@@ -7,8 +7,8 @@ Offline, GPU-accelerated text-to-speech powered by [Kokoro-82M](https://huggingf
 - ~6× faster than real-time on CPU alone
 - Draggable playback controller with pause, seek, and ±10s skip
 - Claude Code hook: every response is spoken as a short voice blurb
-- Global hotkeys via AutoHotkey (Windows)
-- Single-command install
+- Global hotkeys via AutoHotkey (Windows only)
+- Single-command install on Windows and macOS
 
 ---
 
@@ -18,6 +18,8 @@ Offline, GPU-accelerated text-to-speech powered by [Kokoro-82M](https://huggingf
 
 ### Prerequisites
 
+#### Windows
+
 | Requirement | Version | How to verify |
 |---|---|---|
 | Windows 10/11 | — | `ver` in cmd |
@@ -25,7 +27,22 @@ Offline, GPU-accelerated text-to-speech powered by [Kokoro-82M](https://huggingf
 | Internet connection | — | Required for first-run model download only |
 | AutoHotkey v2 *(optional)* | v2.x | https://www.autohotkey.com |
 
-Python must be on `PATH`. If `python --version` fails, download from https://www.python.org/downloads/ and ensure "Add to PATH" is checked during install.
+Python must be on `PATH`. If `python --version` fails, download from https://www.python.org/downloads/ and check "Add to PATH" during install.
+
+#### macOS
+
+| Requirement | Version | How to verify |
+|---|---|---|
+| macOS | 12 Monterey or newer | `sw_vers` |
+| Python | 3.10 or newer | `python3 --version` |
+| Xcode Command Line Tools | — | `xcode-select --install` (if not already installed) |
+| Internet connection | — | Required for first-run model download only |
+
+PortAudio is required by `sounddevice`. Install via Homebrew:
+```bash
+brew install portaudio
+```
+If Homebrew is not installed: https://brew.sh
 
 ---
 
@@ -42,23 +59,32 @@ cd local-tts-for-ai-agents
 
 ### Step 2 — Run setup
 
+**Windows:**
 ```bash
 python setup.py
 ```
 
+**macOS:**
+```bash
+python3 setup.py
+```
+
 This command:
 1. Creates `./venv/` — Python virtual environment
-2. Installs packages: `kokoro-onnx`, `onnxruntime-directml`, `sounddevice`, `soundfile`
+2. Installs packages:
+   - Windows: `kokoro-onnx`, `onnxruntime-directml`, `sounddevice`, `soundfile`
+   - macOS: `kokoro-onnx`, `onnxruntime`, `sounddevice`, `soundfile`
 3. Downloads model files into `./models/` (~355 MB total, one-time)
    - `kokoro-v1.0.onnx` (325 MB)
    - `voices-v1.0.bin` (28 MB)
-4. Writes `./kokoro_hook.bat` with the correct paths for this install location
+4. Writes `./kokoro_hook.bat` (Windows) or `./kokoro_hook.sh` (macOS) with the correct paths for this install location
 5. Patches `~/.claude/settings.json` to register the Claude Code Stop hook
 
 **Expected output ends with:** `Setup complete!`
 
 **If setup fails:**
 - Package install error → check internet connection, retry
+- macOS `sounddevice` error → run `brew install portaudio` first
 - Model download error → GitHub releases may be temporarily unavailable, retry
 - settings.json error → ensure `~/.claude/` directory exists (it is created by Claude Code on first run)
 
@@ -69,11 +95,18 @@ This command:
 The Stop hook is loaded at startup. **Restart any running Claude Code instances** for the hook to take effect.
 
 **Verify the hook is registered:**
+
+Windows:
 ```bash
 python -c "import json; s=json.load(open(r'%USERPROFILE%\.claude\settings.json')); print(s.get('hooks', {}).get('Stop', 'NOT FOUND'))"
 ```
 
-Expected: a list containing an entry with `kokoro_hook.bat` in the command path.
+macOS:
+```bash
+python3 -c "import json, os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'))); print(s.get('hooks', {}).get('Stop', 'NOT FOUND'))"
+```
+
+Expected: a list containing an entry with `kokoro_hook` in the command path.
 
 ---
 
@@ -81,6 +114,7 @@ Expected: a list containing an entry with `kokoro_hook.bat` in the command path.
 
 Voice responses are controlled by a toggle file. Create it to enable:
 
+**Windows:**
 ```bash
 # Enable
 type nul > "%USERPROFILE%\.claude\voice_enabled"
@@ -89,16 +123,30 @@ type nul > "%USERPROFILE%\.claude\voice_enabled"
 del "%USERPROFILE%\.claude\voice_enabled"
 ```
 
-**Verify:**
+**macOS:**
+```bash
+# Enable
+touch ~/.claude/voice_enabled
+
+# Disable
+rm ~/.claude/voice_enabled
+```
+
+**Verify (Windows):**
 ```bash
 if exist "%USERPROFILE%\.claude\voice_enabled" (echo ON) else (echo OFF)
+```
+
+**Verify (macOS):**
+```bash
+[ -f ~/.claude/voice_enabled ] && echo ON || echo OFF
 ```
 
 ---
 
 ### Step 5 — (Optional) Set up global hotkeys
 
-Double-click `kokoro_hotkey.ahk` to activate hotkeys. Requires AutoHotkey v2.
+**Windows only.** Double-click `kokoro_hotkey.ahk` to activate hotkeys. Requires AutoHotkey v2.
 
 **Verify:** The AutoHotkey icon (green H) appears in the system tray.
 
@@ -108,22 +156,36 @@ To start hotkeys automatically with Windows:
 powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Startup')+'\kokoro_hotkey.lnk');$s.TargetPath='%CD%\kokoro_hotkey.ahk';$s.Save()"
 ```
 
+macOS: AutoHotkey is not available. Use the CLI directly (see Usage section).
+
 ---
 
 ### Verification — End-to-end test
 
 Run this and confirm you hear audio output:
 
+**Windows:**
 ```bash
 venv\Scripts\python.exe tts.py "Setup is complete. Local TTS is working correctly." --play
+```
+
+**macOS:**
+```bash
+venv/bin/python tts.py "Setup is complete. Local TTS is working correctly." --play
 ```
 
 **Expected:** A player window appears, audio plays, the playback controller shows a moving progress bar.
 
 Test the Claude Code hook directly:
 
+**Windows:**
 ```bash
 echo {"session_id":"test","stop_hook_active":false,"last_assistant_message":"Setup verified. Voice responses are now active."} | venv\Scripts\python.exe tts_hook.py
+```
+
+**macOS:**
+```bash
+echo '{"session_id":"test","stop_hook_active":false,"last_assistant_message":"Setup verified. Voice responses are now active."}' | venv/bin/python tts_hook.py
 ```
 
 **Expected:** Audio plays within ~2 seconds (model load + generation).
@@ -134,11 +196,12 @@ echo {"session_id":"test","stop_hook_active":false,"last_assistant_message":"Set
 
 ```
 local-tts-for-ai-agents/
-├── setup.py              ← one-command installer
+├── setup.py              ← one-command installer (Windows + macOS)
 ├── tts.py                ← TTS engine + playback controller
 ├── tts_hook.py           ← Claude Code Stop hook script
-├── kokoro_hotkey.ahk     ← AutoHotkey global hotkeys
-├── kokoro_hook.bat       ← generated by setup.py, called by Claude Code
+├── kokoro_hotkey.ahk     ← AutoHotkey global hotkeys (Windows only)
+├── kokoro_hook.bat       ← generated by setup.py on Windows
+├── kokoro_hook.sh        ← generated by setup.py on macOS
 ├── requirements.txt      ← package list (reference only; setup.py installs)
 ├── models/               ← downloaded by setup.py (gitignored)
 │   ├── kokoro-v1.0.onnx
@@ -152,31 +215,33 @@ local-tts-for-ai-agents/
 
 ### Command-line TTS
 
+**Windows:**
 ```bash
-# Speak text, show player controller
-venv\Scripts\python.exe tts.py "Your text here"
 venv\Scripts\python.exe tts.py "Your text here" --play
-
-# Read from file
 venv\Scripts\python.exe tts.py --file myfile.txt --play
-
-# Different voice and speed
 venv\Scripts\python.exe tts.py "Hello" --voice am_adam --speed 1.1 --out hello.wav
-
-# List all 19 available voices
 venv\Scripts\python.exe tts.py --list-voices
-
-# Silent autoplay (no window) — used by the Claude Code hook
 venv\Scripts\python.exe tts.py --file input.txt --autoplay
 ```
 
-### Global Hotkeys (AutoHotkey required)
+**macOS:**
+```bash
+venv/bin/python tts.py "Your text here" --play
+venv/bin/python tts.py --file myfile.txt --play
+venv/bin/python tts.py "Hello" --voice am_adam --speed 1.1 --out hello.wav
+venv/bin/python tts.py --list-voices
+venv/bin/python tts.py --file input.txt --autoplay
+```
+
+### Global Hotkeys (Windows + AutoHotkey v2 required)
 
 | Hotkey | Action |
 |---|---|
 | `Ctrl+Alt+R` | Read selected text — opens the TTS player |
 | `Ctrl+Alt+V` | Toggle Claude Code voice responses on/off |
 | `Ctrl+Alt+S` | Stop playback immediately |
+
+macOS: AutoHotkey is not available. Use the CLI or assign system shortcuts to shell commands as needed.
 
 ### Playback Controller
 
@@ -199,6 +264,10 @@ Toggle from within any Claude Code session:
 /voice on       ← enable
 /voice off      ← disable
 ```
+
+Or toggle the file directly:
+- **Windows:** `Ctrl+Alt+V` (AutoHotkey) — or create/delete `%USERPROFILE%\.claude\voice_enabled`
+- **macOS:** `touch ~/.claude/voice_enabled` (on) / `rm ~/.claude/voice_enabled` (off)
 
 ---
 
@@ -240,23 +309,41 @@ Or in the Claude Code hook, set the `--voice` flag in `kokoro_hook.bat`.
 
 ### No audio after setup
 
+**Windows:**
 1. Check the hook log: `type %TEMP%\kokoro_hook.log`
 2. Test autoplay directly: `venv\Scripts\python.exe tts.py "test" --autoplay`
+3. Ensure Claude Code was restarted after setup
+
+**macOS:**
+1. Check the hook log: `cat /tmp/kokoro_hook.log`
+2. Test autoplay directly: `venv/bin/python tts.py "test" --autoplay`
 3. Ensure Claude Code was restarted after setup
 
 ### Hook is not firing (log file empty after Claude responds)
 
 1. Verify settings.json contains the hook: check `~/.claude/settings.json`
-2. Re-run `python setup.py` to re-patch
+2. Re-run `python setup.py` (or `python3 setup.py` on macOS) to re-patch
 3. Restart Claude Code
 
 ### Voice responses enabled but nothing plays
 
-Check the toggle file exists: `if exist "%USERPROFILE%\.claude\voice_enabled" echo ON`
+**Windows:** `if exist "%USERPROFILE%\.claude\voice_enabled" echo ON`
+
+**macOS:** `[ -f ~/.claude/voice_enabled ] && echo ON || echo OFF`
+
+### sounddevice error on macOS
+
+Install PortAudio via Homebrew:
+```bash
+brew install portaudio
+pip install --force-reinstall sounddevice
+```
 
 ### GPU acceleration
 
-This package installs `onnxruntime-directml` for AMD/Intel/NVIDIA GPU acceleration via Windows DirectX 12. Due to a known DirectML bug with ConvTranspose operations in the Kokoro model, inference currently falls back to CPU automatically. CPU inference is ~6× faster than real-time and suitable for all use cases.
+**Windows:** This package installs `onnxruntime-directml` for AMD/Intel/NVIDIA GPU acceleration via DirectX 12. Due to a known DirectML bug with ConvTranspose operations in the Kokoro model, inference currently falls back to CPU automatically. CPU inference is ~6× faster than real-time and suitable for all use cases.
+
+**macOS:** Standard `onnxruntime` is installed. Apple Silicon (M1/M2/M3) achieves similar ~6× realtime performance on CPU.
 
 ---
 
@@ -264,8 +351,8 @@ This package installs `onnxruntime-directml` for AMD/Intel/NVIDIA GPU accelerati
 
 | Platform | Status |
 |---|---|
-| Windows 10/11 | Fully supported |
-| macOS | Not supported (AutoHotkey is Windows-only; TTS core works) |
+| Windows 10/11 | Fully supported (TTS core + Claude Code hook + AutoHotkey hotkeys) |
+| macOS 12+ | Supported (TTS core + Claude Code hook; no AutoHotkey) |
 | Linux | Not supported |
 
 ---

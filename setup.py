@@ -9,28 +9,37 @@ What this does:
   1. Creates a Python virtual environment at ./venv/
   2. Installs required packages into the venv
   3. Downloads Kokoro-82M model files into ./models/
-  4. Generates kokoro_hook.bat with the correct install path
+  4. Generates kokoro_hook.bat (Windows) or kokoro_hook.sh (macOS)
   5. Patches ~/.claude/settings.json to register the Stop hook
 
 Prerequisites: Python 3.10+, internet connection for first run.
+Supported platforms: Windows 10/11, macOS 12+.
 """
 
 import json
 import os
+import stat
 import subprocess
 import sys
 import urllib.request
 import venv
 from pathlib import Path
 
+IS_WINDOWS = sys.platform == "win32"
+IS_MAC     = sys.platform == "darwin"
+
 # -- paths -----------------------------------------------------
-REPO_DIR       = Path(__file__).parent.resolve()
-VENV_DIR       = REPO_DIR / "venv"
-MODELS_DIR     = REPO_DIR / "models"
-HOOK_SCRIPT    = REPO_DIR / "tts_hook.py"
-BAT_FILE       = REPO_DIR / "kokoro_hook.bat"
-CLAUDE_DIR     = Path.home() / ".claude"
+REPO_DIR        = Path(__file__).parent.resolve()
+VENV_DIR        = REPO_DIR / "venv"
+MODELS_DIR      = REPO_DIR / "models"
+HOOK_SCRIPT     = REPO_DIR / "tts_hook.py"
+CLAUDE_DIR      = Path.home() / ".claude"
 CLAUDE_SETTINGS = CLAUDE_DIR / "settings.json"
+
+if IS_WINDOWS:
+    HOOK_LAUNCHER = REPO_DIR / "kokoro_hook.bat"
+else:
+    HOOK_LAUNCHER = REPO_DIR / "kokoro_hook.sh"
 
 # -- model downloads -------------------------------------------
 MODELS = {
@@ -45,12 +54,21 @@ MODELS = {
 }
 
 # -- packages --------------------------------------------------
-PACKAGES = [
+PACKAGES_COMMON = [
     "kokoro-onnx",
-    "onnxruntime-directml",  # GPU acceleration via DirectML (Windows)
     "sounddevice",
     "soundfile",
 ]
+
+PACKAGES_WINDOWS = [
+    "onnxruntime-directml",  # DirectX 12 GPU acceleration (AMD/Intel/NVIDIA)
+]
+
+PACKAGES_MAC = [
+    "onnxruntime",           # Standard ONNX Runtime for macOS
+]
+
+PACKAGES = PACKAGES_COMMON + (PACKAGES_WINDOWS if IS_WINDOWS else PACKAGES_MAC)
 
 
 # -- helpers ---------------------------------------------------
@@ -70,11 +88,15 @@ def fail(msg: str):
 
 
 def pip() -> str:
-    return str(VENV_DIR / "Scripts" / "pip.exe")
+    if IS_WINDOWS:
+        return str(VENV_DIR / "Scripts" / "pip.exe")
+    return str(VENV_DIR / "bin" / "pip")
 
 
 def python_exe() -> str:
-    return str(VENV_DIR / "Scripts" / "python.exe")
+    if IS_WINDOWS:
+        return str(VENV_DIR / "Scripts" / "python.exe")
+    return str(VENV_DIR / "bin" / "python")
 
 
 # -- steps -----------------------------------------------------
@@ -128,15 +150,25 @@ def download_models():
         ok(f"{name} ({dest.stat().st_size:,} bytes)")
 
 
-def write_bat():
+def write_hook_launcher():
     """
-    Generate kokoro_hook.bat with the exact path to python.exe in this venv.
-    This file is what Claude Code's Stop hook calls.
+    Generate the platform-appropriate hook launcher script.
+    Windows: kokoro_hook.bat  (uses python.exe so stdin pipe works)
+    macOS:   kokoro_hook.sh   (chmod 755)
     """
-    py = REPO_DIR / "venv" / "Scripts" / "python.exe"
-    bat = f'@echo off\n"{py}" "{HOOK_SCRIPT}"\n'
-    BAT_FILE.write_text(bat, encoding="utf-8")
-    ok(f"kokoro_hook.bat written to {BAT_FILE}")
+    if IS_WINDOWS:
+        py = REPO_DIR / "venv" / "Scripts" / "python.exe"
+        content = f'@echo off\n"{py}" "{HOOK_SCRIPT}"\n'
+        HOOK_LAUNCHER.write_text(content, encoding="utf-8")
+        ok(f"kokoro_hook.bat written to {HOOK_LAUNCHER}")
+    else:
+        py = REPO_DIR / "venv" / "bin" / "python"
+        content = f'#!/bin/sh\n"{py}" "{HOOK_SCRIPT}"\n'
+        HOOK_LAUNCHER.write_text(content, encoding="utf-8")
+        # Make executable
+        current = HOOK_LAUNCHER.stat().st_mode
+        HOOK_LAUNCHER.chmod(current | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        ok(f"kokoro_hook.sh written to {HOOK_LAUNCHER}")
 
 
 def patch_settings():
@@ -153,7 +185,7 @@ def patch_settings():
         except json.JSONDecodeError:
             print("  Warning: existing settings.json could not be parsed — starting fresh")
 
-    hook_command = str(BAT_FILE)
+    hook_command = str(HOOK_LAUNCHER)
     new_hook = {"type": "command", "command": hook_command, "timeout": 10}
 
     hooks    = settings.setdefault("hooks", {})
@@ -196,8 +228,8 @@ def main():
     header("Step 4 — Kokoro-82M model files")
     download_models()
 
-    header("Step 5 — Hook launcher (kokoro_hook.bat)")
-    write_bat()
+    header("Step 5 — Hook launcher")
+    write_hook_launcher()
 
     header("Step 6 — Claude Code settings.json")
     patch_settings()
@@ -205,6 +237,25 @@ def main():
     print("\n" + "=" * 58)
     print("  Setup complete!")
     print("=" * 58)
+    if IS_WINDOWS:
+        py_cmd = r"venv\Scripts\python.exe"
+        hotkey_note = (
+            "\n3. (Optional) Start the global hotkeys:\n"
+            "   - Double-click kokoro_hotkey.ahk\n"
+            "   - Requires AutoHotkey v2: https://www.autohotkey.com\n"
+            "\nHOTKEYS (while AutoHotkey is running)\n"
+            "--------------------------------------\n"
+            "  Ctrl+Alt+R   Select any text -> open TTS player\n"
+            "  Ctrl+Alt+V   Toggle Claude Code voice responses on/off\n"
+            "  Ctrl+Alt+S   Stop playback\n"
+        )
+    else:
+        py_cmd = "venv/bin/python"
+        hotkey_note = (
+            "\n3. Global hotkeys: AutoHotkey is Windows-only.\n"
+            "   Use the CLI directly or assign your own keyboard shortcuts.\n"
+        )
+
     print(f"""
 NEXT STEPS
 ----------
@@ -212,24 +263,13 @@ NEXT STEPS
    (The hook fires at the end of every response.)
 
 2. Enable voice responses:
-   • Press Ctrl+Alt+V  (if AutoHotkey is running), OR
-   • Create the file:  {CLAUDE_DIR / "voice_enabled"}
-
-3. (Optional) Start the global hotkeys:
-   • Double-click kokoro_hotkey.ahk
-   • Requires AutoHotkey v2: https://www.autohotkey.com
-
-HOTKEYS (while AutoHotkey is running)
---------------------------------------
-  Ctrl+Alt+R   Select any text → open TTS player
-  Ctrl+Alt+V   Toggle Claude Code voice responses on/off
-  Ctrl+Alt+S   Stop playback
-
+   Create the file:  {CLAUDE_DIR / "voice_enabled"}
+{hotkey_note}
 MANUAL USAGE
 ------------
-  venv\\Scripts\\python.exe tts.py "Hello world"
-  venv\\Scripts\\python.exe tts.py --list-voices
-  venv\\Scripts\\python.exe tts.py --file myfile.txt --play
+  {py_cmd} tts.py "Hello world"
+  {py_cmd} tts.py --list-voices
+  {py_cmd} tts.py --file myfile.txt --play
 """)
 
 

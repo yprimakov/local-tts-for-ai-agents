@@ -2,9 +2,9 @@
 Claude Code Stop hook — speaks a short blurb of each response via Kokoro TTS.
 
 Toggle voice responses on/off:
-  Create file:  %USERPROFILE%\\.claude\\voice_enabled   (ON)
-  Delete file:  %USERPROFILE%\\.claude\\voice_enabled   (OFF)
-  Or press Ctrl+Alt+V in the AHK hotkey script.
+  Create file:  ~/.claude/voice_enabled   (ON)
+  Delete file:  ~/.claude/voice_enabled   (OFF)
+  Windows: also toggle with Ctrl+Alt+V in the AHK hotkey script.
 """
 
 import json
@@ -12,16 +12,20 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 # ── config ────────────────────────────────────────────────────
-TOGGLE_FILE = os.path.join(
-    os.environ.get("USERPROFILE", os.path.expanduser("~")),
-    ".claude", "voice_enabled",
-)
-PYTHON     = os.path.join(os.path.dirname(__file__), "venv", "Scripts", "pythonw.exe")
-TTS_SCRIPT = os.path.join(os.path.dirname(__file__), "tts.py")
-TMPFILE    = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "kokoro_hook_blurb.txt")
-LOG_FILE   = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "kokoro_hook.log")
+TOGGLE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "voice_enabled")
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if sys.platform == "win32":
+    PYTHON = os.path.join(_HERE, "venv", "Scripts", "pythonw.exe")
+else:
+    PYTHON = os.path.join(_HERE, "venv", "bin", "python")
+
+TTS_SCRIPT = os.path.join(_HERE, "tts.py")
+TMPFILE    = os.path.join(tempfile.gettempdir(), "kokoro_hook_blurb.txt")
+LOG_FILE   = os.path.join(tempfile.gettempdir(), "kokoro_hook.log")
 
 MAX_CHARS  = 300   # ~2-3 sentences
 MIN_CHARS  = 12    # skip if too short to bother

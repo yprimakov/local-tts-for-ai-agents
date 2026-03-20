@@ -5,3 +5,4 @@ __pycache__/
 *.wav
 *.log
 kokoro_hook.bat
+kokoro_hook.sh
