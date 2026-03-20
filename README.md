@@ -71,9 +71,7 @@ python3 setup.py
 
 This command:
 1. Creates `./venv/` — Python virtual environment
-2. Installs packages:
-   - Windows: `kokoro-onnx`, `onnxruntime-directml`, `sounddevice`, `soundfile`
-   - macOS: `kokoro-onnx`, `onnxruntime`, `sounddevice`, `soundfile`
+2. Installs packages: `kokoro-onnx`, `onnxruntime`, `sounddevice`, `soundfile`
 3. Downloads model files into `./models/` (~355 MB total, one-time)
    - `kokoro-v1.0.onnx` (325 MB)
    - `voices-v1.0.bin` (28 MB)
@@ -341,9 +339,7 @@ pip install --force-reinstall sounddevice
 
 ### GPU acceleration
 
-**Windows:** This package installs `onnxruntime-directml` for AMD/Intel/NVIDIA GPU acceleration via DirectX 12. Due to a known DirectML bug with ConvTranspose operations in the Kokoro model, inference currently falls back to CPU automatically. CPU inference is ~6× faster than real-time and suitable for all use cases.
-
-**macOS:** Standard `onnxruntime` is installed. Apple Silicon (M1/M2/M3) achieves similar ~6× realtime performance on CPU.
+Both Windows and macOS use standard `onnxruntime` (CPU execution). CPU inference is ~6× faster than real-time and suitable for all use cases. `onnxruntime-directml` is not used — it has a known bug with Kokoro's ConvTranspose operation and causes initialization hangs on some AMD/Windows systems.
 
 ---
 

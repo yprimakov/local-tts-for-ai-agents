@@ -61,7 +61,8 @@ PACKAGES_COMMON = [
 ]
 
 PACKAGES_WINDOWS = [
-    "onnxruntime-directml",  # DirectX 12 GPU acceleration (AMD/Intel/NVIDIA)
+    "onnxruntime",  # Plain ONNX Runtime — directml has a known ConvTranspose bug
+                    # with Kokoro and causes DLL init hangs on some AMD systems
 ]
 
 PACKAGES_MAC = [

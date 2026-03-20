@@ -1,7 +1,8 @@
 kokoro-onnx
+onnxruntime
 sounddevice
 soundfile
 
-# Platform-specific ONNX Runtime (setup.py selects the right one automatically):
-#   Windows: onnxruntime-directml  (DirectX 12 GPU acceleration)
-#   macOS:   onnxruntime            (standard build)
+# Note: onnxruntime-directml is NOT used. It has a known bug with Kokoro's
+# ConvTranspose operation and causes DLL init hangs on some AMD/Windows systems.
+# Plain onnxruntime with CPUExecutionProvider is ~6x realtime and sufficient.
