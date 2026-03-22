@@ -153,67 +153,66 @@ class AudioPlayer:
 
 
 # ════════════════════════════════════════════════════════════
-#  KokoroController  —  neumorphic dark player window
+#  KokoroController  —  dark glass card player window
 # ════════════════════════════════════════════════════════════
 class KokoroController:
-    W          = 320
-    H_TITLE    = 38
-    H_LOADING  = 82
-    H_PLAYBACK = 118
+    W         = 340
+    H_TITLE   = 48
+    H_CONTENT = 130
+    RADIUS    = 14
 
-    # ── Neumorphic dark palette (iMadeFire brand) ─────────────
-    C_BASE  = "#1a1a2a"   # main surface
-    C_DARK  = "#111120"   # dark shadow
-    C_LIGHT = "#27274a"   # light shadow / highlight
-    C_FIRE1 = "#ec7200"   # brand orange
-    C_FIRE2 = "#e5c84a"   # brand amber
-    C_TEXT  = "#e8eaf6"   # near white
-    C_DIM   = "#5e6a9a"   # muted label
-    SPIN    = ["◐", "◓", "◑", "◒"]
+    # Transparent key — unique near-black, never used in the card
+    TRANS_KEY = "#010101"
+
+    # Dark glass palette (inspired by iMadeFire dashboard style)
+    C_CARD    = "#12122a"   # card surface
+    C_BORDER  = "#26265a"   # card border
+    C_DIVIDER = "#1c1c3e"   # section divider line
+    C_ACCENT1 = "#f07020"   # brand orange
+    C_ACCENT2 = "#f5c842"   # brand amber
+    C_TEXT    = "#e8eaf6"   # near white
+    C_DIM     = "#6272a4"   # muted text
+    C_BTN     = "#1c1c3e"   # button / track bg
+    C_BTN_BD  = "#2c2c56"   # button border
+    SPIN      = ["◐", "◓", "◑", "◒"]
 
     def __init__(self):
         import tkinter as tk
-        self.tk   = tk
-        self.root = tk.Tk()
-        self.player:   AudioPlayer | None = None
-        self._tmp_wav: str | None         = None
-        self._spin_idx    = 0
-        self._drag_ref    = None
-        self._end_handled = False
-        self._logo_img    = None   # PhotoImage (SVG rendered via svglib)
-        self._grad_img    = None   # progress gradient PhotoImage
-        self._btn_boxes:  dict[str, tuple] = {}
+        self.tk            = tk
+        self.root          = tk.Tk()
+        self.player: AudioPlayer | None = None
+        self._tmp_wav: str | None       = None
+        self._spin_idx     = 0
+        self._drag_ref     = None
+        self._end_handled  = False
+        self._logo_img     = None
+        self._grad_img     = None
+        self._glow_img     = None
+        self._btn_boxes: dict[str, tuple] = {}
+        self._state        = "loading"
 
         self._setup_window()
         self._load_logo()
-        self._build_title_bar()
-        self._build_loading()
-        self._build_playback()
-        self._show_loading()
+        self._build_ui()
+        self._set_state("loading")
 
     # ── window ────────────────────────────────────────────────
     def _setup_window(self):
         r = self.root
         r.overrideredirect(True)
         r.attributes("-topmost", True)
-        r.configure(bg=self.C_BASE)
+        r.configure(bg=self.TRANS_KEY)
+        try:
+            r.wm_attributes("-transparentcolor", self.TRANS_KEY)
+        except Exception:
+            r.configure(bg=self.C_CARD)
         r.resizable(False, False)
-
+        h  = self.H_TITLE + self.H_CONTENT
         sw = r.winfo_screenwidth()
         sh = r.winfo_screenheight()
-        h  = self.H_TITLE + self.H_LOADING
         r.geometry(f"{self.W}x{h}+{sw - self.W - 20}+{sh - h - 70}")
 
-        try:
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(r.winfo_id())
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, 33, ctypes.byref(ctypes.c_int(2)), 4
-            )
-        except Exception:
-            pass
-
-    # ── optional SVG logo (requires svglib + reportlab) ───────
+    # ── SVG logo (svglib optional; black bg made transparent) ─
     def _load_logo(self):
         try:
             from svglib.svglib import svg2rlg
@@ -224,236 +223,255 @@ class KokoroController:
             drawing = svg2rlg(LOGO_PATH)
             if not drawing:
                 return
-            target_h = 22
-            target_w = int(target_h * drawing.width / drawing.height)
-            img = renderPM.drawToPIL(drawing, dpi=96)
-            img = img.resize((target_w, target_h), Image.LANCZOS)
-            self._logo_img = ImageTk.PhotoImage(img)
+            target_h = 20
+            scale    = target_h / drawing.height
+            target_w = min(int(drawing.width * scale), 180)
+            pil_img  = renderPM.drawToPIL(drawing, dpi=max(72, int(96 * scale)))
+            pil_img  = pil_img.resize((target_w, target_h), Image.LANCZOS)
+            pil_img  = pil_img.convert("RGBA")
+            pixels   = pil_img.load()
+            for y in range(pil_img.height):
+                for x in range(pil_img.width):
+                    rv, gv, bv, av = pixels[x, y]
+                    if rv < 60 and gv < 60 and bv < 60:
+                        pixels[x, y] = (rv, gv, bv, 0)
+            self._logo_img = ImageTk.PhotoImage(pil_img)
         except Exception:
             pass
 
-    # ── drawing helpers ───────────────────────────────────────
-    def _rrect(self, canvas, x1, y1, x2, y2, r=8, **kw):
-        """Smooth rounded rectangle via spline polygon."""
+    # ── canvas helper ─────────────────────────────────────────
+    def _rrect(self, cv, x1, y1, x2, y2, r=10, **kw):
+        r = max(1, min(r, (x2 - x1) // 2, (y2 - y1) // 2))
         pts = [
-            x1 + r, y1,     x2 - r, y1,
-            x2,     y1,     x2,     y1 + r,
-            x2,     y2 - r, x2,     y2,
-            x2 - r, y2,     x1 + r, y2,
-            x1,     y2,     x1,     y2 - r,
-            x1,     y1 + r, x1,     y1,
+            x1+r, y1,   x2-r, y1,
+            x2,   y1,   x2,   y1+r,
+            x2,   y2-r, x2,   y2,
+            x2-r, y2,   x1+r, y2,
+            x1,   y2,   x1,   y2-r,
+            x1,   y1+r, x1,   y1,
         ]
-        return canvas.create_polygon(pts, smooth=True, **kw)
+        return cv.create_polygon(pts, smooth=True, **kw)
 
-    def _neu_raised(self, canvas, x1, y1, x2, y2, r=9, s=3):
-        """Draw a raised neumorphic surface (dark shadow BR, light shadow TL)."""
-        self._rrect(canvas, x1+s, y1+s, x2+s, y2+s, r, fill=self.C_DARK,  outline="")
-        self._rrect(canvas, x1-s, y1-s, x2-s, y2-s, r, fill=self.C_LIGHT, outline="")
-        self._rrect(canvas, x1,   y1,   x2,   y2,   r, fill=self.C_BASE,  outline="")
+    # ── main canvas ───────────────────────────────────────────
+    def _build_ui(self):
+        tk  = self.tk
+        h   = self.H_TITLE + self.H_CONTENT
+        R   = self.RADIUS
+        cv  = tk.Canvas(self.root, width=self.W, height=h,
+                        bg=self.TRANS_KEY, highlightthickness=0)
+        cv.pack(fill="both", expand=True)
+        self._cv = cv
 
-    def _neu_inset(self, canvas, x1, y1, x2, y2, r=5):
-        """Draw an inset neumorphic channel (dark shadow TL, light shadow BR)."""
-        self._rrect(canvas, x1,   y1,   x2,   y2,   r, fill=self.C_DARK,  outline="")
-        canvas.create_line(x1+r, y1+1, x2-r, y1+1, fill=self.C_DARK,  width=1)
-        canvas.create_line(x1+1, y1+r, x1+1, y2-r, fill=self.C_DARK,  width=1)
-        canvas.create_line(x1+r, y2-1, x2-r, y2-1, fill=self.C_LIGHT, width=1)
-        canvas.create_line(x2-1, y1+r, x2-1, y2-r, fill=self.C_LIGHT, width=1)
+        # Card border + fill (rounded corners via smooth polygon)
+        self._rrect(cv, 0, 0, self.W, h, r=R,
+                    fill=self.C_BORDER, outline="")
+        self._rrect(cv, 1, 1, self.W - 1, h - 1, r=R - 1,
+                    fill=self.C_CARD, outline="")
 
-    def _neu_button(self, canvas, cx, cy, w, h, label, name, fsize=10):
-        """Draw a full neumorphic button and register its hit box."""
-        x1, y1, x2, y2 = cx - w//2, cy - h//2, cx + w//2, cy + h//2
-        self._neu_raised(canvas, x1, y1, x2, y2)
-        is_play = (name == "play")
-        color   = self.C_FIRE1 if is_play else self.C_TEXT
-        canvas.create_text(cx, cy, text=label, fill=color,
-                           font=("Segoe UI", fsize), tags=f"btn_{name}_txt")
-        self._btn_boxes[name] = (x1, y1, x2, y2)
-        for part in (f"btn_{name}_txt",):
-            canvas.tag_bind(part, "<Enter>", lambda e, n=name: self._btn_hover(n, True))
-            canvas.tag_bind(part, "<Leave>", lambda e, n=name: self._btn_hover(n, False))
+        # Orange→amber glow at card bottom
+        self._build_glow(cv, h)
 
-    def _btn_hover(self, name, entering):
-        # Re-draw surface polygon on hover by tagging isn't trivial — instead
-        # just change the text color to indicate hover.
-        c = self._play_cv
-        if name == "play":
-            c.itemconfig(f"btn_{name}_txt", fill=self.C_FIRE2 if entering else self.C_FIRE1)
-        else:
-            c.itemconfig(f"btn_{name}_txt", fill=self.C_TEXT if entering else self.C_DIM)
+        # Title bar
+        self._build_title(cv)
 
-    # ── title bar ─────────────────────────────────────────────
-    def _build_title_bar(self):
-        tk = self.tk
-        c  = tk.Canvas(self.root, width=self.W, height=self.H_TITLE,
-                       bg=self.C_DARK, highlightthickness=0)
-        c.pack(fill="x")
-        self._title_cv = c
+        # Divider under title
+        cv.create_line(14, self.H_TITLE, self.W - 14, self.H_TITLE,
+                       fill=self.C_DIVIDER, width=1)
 
-        # Subtle bottom separator
-        c.create_line(0, self.H_TITLE - 1, self.W, self.H_TITLE - 1,
-                      fill=self.C_LIGHT)
+        # Content items (shown/hidden via state tags)
+        self._build_loading_items(cv)
+        self._build_playback_items(cv)
 
-        my = self.H_TITLE // 2
+        cv.bind("<ButtonPress-1>",   self._on_click)
+        cv.bind("<B1-Motion>",       self._on_drag)
+        cv.bind("<ButtonRelease-1>", lambda e: setattr(self, "_drag_ref", None))
 
-        if self._logo_img:
-            lw = self._logo_img.width()
-            c.create_image(14, my, anchor="w", image=self._logo_img, tags="drag")
-            c.create_text(14 + lw + 7, my, text="TTS", anchor="w",
-                          fill=self.C_DIM, font=("Segoe UI", 9), tags="drag")
-        else:
-            # Text fallback — brand name in fire orange + "TTS" dimmed
-            c.create_text(14, my, text="iMadeFire", anchor="w",
-                          fill=self.C_FIRE1, font=("Segoe UI", 11, "bold"), tags="drag")
-            c.create_text(100, my, text="TTS", anchor="w",
-                          fill=self.C_DIM, font=("Segoe UI", 9), tags="drag")
-
-        # Neumorphic close button
-        bx, by, br = self.W - 18, my, 9
-        c.create_oval(bx-br+2, by-br+2, bx+br+2, by+br+2,
-                      fill=self.C_DARK, outline="", tags="cls_sd")
-        c.create_oval(bx-br-1, by-br-1, bx+br-1, by+br-1,
-                      fill=self.C_LIGHT, outline="", tags="cls_sl")
-        c.create_oval(bx-br,   by-br,   bx+br,   by+br,
-                      fill=self.C_BASE,  outline="", tags="cls_bg")
-        c.create_text(bx, by, text="✕", fill=self.C_DIM,
-                      font=("Segoe UI", 8), tags="cls_x")
-
-        for tag in ("cls_bg", "cls_x", "cls_sd", "cls_sl"):
-            c.tag_bind(tag, "<Button-1>", self._close)
-        c.tag_bind("cls_bg", "<Enter>", lambda e: c.itemconfig("cls_x", fill=self.C_TEXT))
-        c.tag_bind("cls_x",  "<Enter>", lambda e: c.itemconfig("cls_x", fill=self.C_TEXT))
-        c.tag_bind("cls_bg", "<Leave>", lambda e: c.itemconfig("cls_x", fill=self.C_DIM))
-        c.tag_bind("cls_x",  "<Leave>", lambda e: c.itemconfig("cls_x", fill=self.C_DIM))
-
-        c.bind("<ButtonPress-1>", self._drag_start)
-        c.bind("<B1-Motion>",     self._drag_move)
-
-    # ── loading frame ─────────────────────────────────────────
-    def _build_loading(self):
-        tk = self.tk
-        c  = tk.Canvas(self.root, width=self.W, height=self.H_LOADING,
-                       bg=self.C_BASE, highlightthickness=0)
-        self._load_cv = c
-
-        mid_x, mid_y = self.W // 2, self.H_LOADING // 2
-        sx = mid_x - 44
-
-        # Inset circle background for spinner
-        sr = 18
-        self._neu_inset(c, sx - sr, mid_y - sr, sx + sr, mid_y + sr, r=sr)
-        # Inner surface
-        ir = sr - 3
-        c.create_oval(sx - ir, mid_y - ir, sx + ir, mid_y + ir,
-                      fill=self.C_DARK, outline="")
-
-        self._spin_item = c.create_text(sx, mid_y, text="◐",
-                                        fill=self.C_FIRE1,
-                                        font=("Segoe UI", 13, "bold"))
-        self._gen_item  = c.create_text(mid_x - 8, mid_y, text="Generating...",
-                                        fill=self.C_TEXT,
-                                        font=("Segoe UI", 11), anchor="w")
-
-    # ── playback frame ────────────────────────────────────────
-    def _build_playback(self):
-        tk = self.tk
-        c  = tk.Canvas(self.root, width=self.W, height=self.H_PLAYBACK,
-                       bg=self.C_BASE, highlightthickness=0)
-        self._play_cv = c
-
-        # ── progress track (inset neumorphic channel) ─────────
-        px, py, pw, ph = 18, 20, self.W - 36, 8
-        self._px, self._py, self._pw, self._ph = px, py, pw, ph
-
-        self._neu_inset(c, px, py, px + pw, py + ph, r=4)
-
-        # Gradient fill image (orange → amber, Pillow)
+    def _build_glow(self, cv, total_h):
         try:
             from PIL import Image, ImageTk
-            r1, g1, b1 = 0xec, 0x72, 0x00
-            r2, g2, b2 = 0xe5, 0xc8, 0x4a
-            img = Image.new("RGB", (pw - 2, ph - 2))
-            pix = img.load()
-            for x in range(pw - 2):
-                t = x / max(pw - 3, 1)
-                col = (int(r1+(r2-r1)*t), int(g1+(g2-g1)*t), int(b1+(b2-b1)*t))
-                for y in range(ph - 2):
-                    pix[x, y] = col
-            self._grad_img = ImageTk.PhotoImage(img)
-            c.create_image(px + 1, py + 1, anchor="nw", image=self._grad_img)
+            gw, gh = self.W - 2, 40
+            img    = Image.new("RGBA", (gw, gh))
+            pix    = img.load()
+            r1, g1, b1 = 0xf0, 0x70, 0x20
+            r2, g2, b2 = 0xf5, 0xc8, 0x42
+            for x in range(gw):
+                t  = x / max(gw - 1, 1)
+                rc = int(r1 + (r2 - r1) * t)
+                gc = int(g1 + (g2 - g1) * t)
+                bc = int(b1 + (b2 - b1) * t)
+                for y in range(gh):
+                    alpha = int(48 * (y / gh) ** 1.6)
+                    pix[x, y] = (rc, gc, bc, alpha)
+            self._glow_img = ImageTk.PhotoImage(img)
+            cv.create_image(1, total_h - gh, anchor="nw", image=self._glow_img)
         except Exception:
-            self._grad_img = None
-            c.create_rectangle(px+1, py+1, px+pw-1, py+ph-1,
-                               fill=self.C_FIRE1, outline="")
+            pass
 
-        # Cover rect — slides right to reveal gradient as audio plays
-        self._prog_cover = c.create_rectangle(
-            px + 1, py + 1, px + pw - 1, py + ph - 1,
-            fill=self.C_DARK, outline="",
+    def _build_title(self, cv):
+        my = self.H_TITLE // 2
+        if self._logo_img:
+            lw = self._logo_img.width()
+            cv.create_image(16, my, anchor="w", image=self._logo_img)
+            cv.create_text(16 + lw + 8, my, text="TTS", anchor="w",
+                           fill=self.C_DIM, font=("Segoe UI", 9))
+        else:
+            cv.create_text(16, my, text="iMadeFire", anchor="w",
+                           fill=self.C_ACCENT1, font=("Segoe UI", 12, "bold"))
+            cv.create_text(100, my, text="TTS", anchor="w",
+                           fill=self.C_DIM, font=("Segoe UI", 9))
+
+        # Close button — small pill
+        bx, br = self.W - 20, 9
+        cv.create_oval(bx - br, my - br, bx + br, my + br,
+                       fill=self.C_BTN, outline=self.C_BTN_BD,
+                       tags=("cls_bg",))
+        cv.create_text(bx, my, text="✕", fill=self.C_DIM,
+                       font=("Segoe UI", 8), tags=("cls_x",))
+
+        def _cls_enter(e):
+            cv.itemconfig("cls_bg", fill=self.C_DIVIDER)
+            cv.itemconfig("cls_x",  fill=self.C_TEXT)
+
+        def _cls_leave(e):
+            cv.itemconfig("cls_bg", fill=self.C_BTN)
+            cv.itemconfig("cls_x",  fill=self.C_DIM)
+
+        for tag in ("cls_bg", "cls_x"):
+            cv.tag_bind(tag, "<Button-1>", self._close)
+            cv.tag_bind(tag, "<Enter>",    _cls_enter)
+            cv.tag_bind(tag, "<Leave>",    _cls_leave)
+
+    def _build_loading_items(self, cv):
+        cy = self.H_TITLE + self.H_CONTENT // 2
+        sx = self.W // 2 - 58
+        sr = 20
+        cv.create_oval(sx - sr, cy - sr, sx + sr, cy + sr,
+                       fill=self.C_BTN, outline=self.C_BTN_BD,
+                       tags="loading")
+        self._spin_item = cv.create_text(
+            sx, cy, text="◐", fill=self.C_ACCENT1,
+            font=("Segoe UI", 14, "bold"), tags="loading",
+        )
+        self._gen_item = cv.create_text(
+            sx + sr + 14, cy, text="Generating...",
+            fill=self.C_TEXT, font=("Segoe UI", 11),
+            anchor="w", tags="loading",
         )
 
-        # ── time labels ───────────────────────────────────────
-        ty = py + ph + 6
-        self._pos_item = c.create_text(px, ty, text="0:00",
-                                       fill=self.C_DIM, font=("Segoe UI", 8),
-                                       anchor="nw")
-        self._dur_item = c.create_text(px + pw, ty, text="0:00",
-                                       fill=self.C_DIM, font=("Segoe UI", 8),
-                                       anchor="ne")
+    def _build_playback_items(self, cv):
+        ty        = self.H_TITLE
+        px, py    = 18, ty + 18
+        pw        = self.W - 36
+        ph        = 6
+        self._px, self._py, self._pw, self._ph = px, py, pw, ph
 
-        # ── control buttons ───────────────────────────────────
+        # Progress track
+        self._rrect(cv, px, py, px + pw, py + ph, r=3,
+                    fill=self.C_BTN, outline=self.C_BTN_BD, tags="playback")
+
+        # Gradient fill (orange → amber)
+        try:
+            from PIL import Image, ImageTk
+            r1, g1, b1 = 0xf0, 0x70, 0x20
+            r2, g2, b2 = 0xf5, 0xc8, 0x42
+            img = Image.new("RGB", (max(1, pw - 2), max(1, ph - 2)))
+            pix = img.load()
+            for x in range(pw - 2):
+                t   = x / max(pw - 3, 1)
+                col = (int(r1+(r2-r1)*t), int(g1+(g2-g1)*t), int(b1+(b2-b1)*t))
+                for yy in range(ph - 2):
+                    pix[x, yy] = col
+            self._grad_img = ImageTk.PhotoImage(img)
+            cv.create_image(px + 1, py + 1, anchor="nw",
+                            image=self._grad_img, tags="playback")
+        except Exception:
+            self._grad_img = None
+            cv.create_rectangle(px+1, py+1, px+pw-1, py+ph-1,
+                                fill=self.C_ACCENT1, outline="", tags="playback")
+
+        # Cover rect slides right as audio plays
+        self._prog_cover = cv.create_rectangle(
+            px + 1, py + 1, px + pw - 1, py + ph - 1,
+            fill=self.C_BTN, outline="", tags="playback",
+        )
+
+        # Time labels
+        ly = py + ph + 8
+        self._pos_item = cv.create_text(
+            px, ly, text="0:00", fill=self.C_DIM,
+            font=("Segoe UI", 8), anchor="nw", tags="playback",
+        )
+        self._dur_item = cv.create_text(
+            px + pw, ly, text="0:00", fill=self.C_DIM,
+            font=("Segoe UI", 8), anchor="ne", tags="playback",
+        )
+
+        # Control buttons
+        btn_y = ty + self.H_CONTENT - 30
         mid   = self.W // 2
-        btn_y = self.H_PLAYBACK - 30
-        self._neu_button(c, mid - 88, btn_y, 58, 34, "« 10", "rew",  fsize=10)
-        self._neu_button(c, mid,      btn_y, 46, 34, "▶",    "play", fsize=16)
-        self._neu_button(c, mid + 88, btn_y, 58, 34, "10 »", "fwd",  fsize=10)
+        self._draw_btn(cv, mid - 84, btn_y, 64, 28, "« 10", "rew")
+        self._draw_btn(cv, mid,      btn_y, 50, 28, "▶",    "play", accent=True)
+        self._draw_btn(cv, mid + 84, btn_y, 64, 28, "10 »", "fwd")
 
-        # Default label brightness
-        c.itemconfig("btn_rew_txt",  fill=self.C_DIM)
-        c.itemconfig("btn_fwd_txt",  fill=self.C_DIM)
+    def _draw_btn(self, cv, cx, cy, w, h, label, name, accent=False):
+        r  = h // 2
+        x1, y1, x2, y2 = cx - w//2, cy - h//2, cx + w//2, cy + h//2
+        fill = self.C_ACCENT1 if accent else self.C_BTN
+        bd   = self.C_ACCENT1 if accent else self.C_BTN_BD
+        tc   = "#ffffff"      if accent else self.C_DIM
+        fs   = 14             if name == "play" else 10
+        self._rrect(cv, x1, y1, x2, y2, r=r,
+                    fill=fill, outline=bd,
+                    tags=(f"btn_{name}", "playback"))
+        cv.create_text(cx, cy, text=label, fill=tc,
+                       font=("Segoe UI", fs),
+                       tags=(f"btn_{name}_txt", "playback"))
+        self._btn_boxes[name] = (x1, y1, x2, y2)
 
-        c.bind("<Button-1>",  self._on_play_click)
-        c.bind("<B1-Motion>", self._on_prog_drag)
+        for tag in (f"btn_{name}", f"btn_{name}_txt"):
+            cv.tag_bind(tag, "<Enter>", lambda e, n=name, a=accent: self._btn_enter(n, a))
+            cv.tag_bind(tag, "<Leave>", lambda e, n=name, a=accent: self._btn_leave(n, a))
 
-    # ── event dispatching ─────────────────────────────────────
-    def _on_play_click(self, event):
-        x, y = event.x, event.y
-        # Progress bar seek
-        if (self._px <= x <= self._px + self._pw and
-                self._py - 6 <= y <= self._py + self._ph + 6):
-            if self.player:
-                self.player.seek_to(max(0.0, min(1.0, (x - self._px) / self._pw)))
-            return
-        # Button hit test
-        actions = {"rew": self._rewind, "play": self._toggle_play, "fwd": self._forward}
-        for name, (x1, y1, x2, y2) in self._btn_boxes.items():
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                actions[name]()
-                return
+    def _btn_enter(self, name, accent):
+        cv = self._cv
+        if accent:
+            cv.itemconfig(f"btn_{name}", fill=self.C_ACCENT2, outline=self.C_ACCENT2)
+        else:
+            cv.itemconfig(f"btn_{name}", fill=self.C_DIVIDER)
+            cv.itemconfig(f"btn_{name}_txt", fill=self.C_TEXT)
 
-    def _on_prog_drag(self, event):
-        if self.player and self._px <= event.x <= self._px + self._pw:
-            self.player.seek_to(max(0.0, min(1.0, (event.x - self._px) / self._pw)))
+    def _btn_leave(self, name, accent):
+        cv = self._cv
+        if accent:
+            cv.itemconfig(f"btn_{name}", fill=self.C_ACCENT1, outline=self.C_ACCENT1)
+        else:
+            cv.itemconfig(f"btn_{name}", fill=self.C_BTN)
+            cv.itemconfig(f"btn_{name}_txt", fill=self.C_DIM)
 
-    # ── state transitions ─────────────────────────────────────
-    def _show_loading(self):
-        self._play_cv.pack_forget()
-        self._load_cv.pack(fill="both", expand=True)
-        self.root.geometry(f"{self.W}x{self.H_TITLE + self.H_LOADING}")
-        self._animate_spinner()
-
-    def _show_playback(self):
-        self._load_cv.pack_forget()
-        self._play_cv.pack(fill="both", expand=True)
-        self.root.geometry(f"{self.W}x{self.H_TITLE + self.H_PLAYBACK}")
-        self.root.update_idletasks()
-        self.root.after(50, self._update_progress)
+    # ── state management ──────────────────────────────────────
+    def _set_state(self, state):
+        self._state = state
+        cv = self._cv
+        if state == "loading":
+            cv.itemconfig("playback", state="hidden")
+            cv.itemconfig("loading",  state="normal")
+            self._animate_spinner()
+        else:
+            cv.itemconfig("loading",  state="hidden")
+            cv.itemconfig("playback", state="normal")
+            self.root.after(50, self._update_progress)
 
     # ── spinner ───────────────────────────────────────────────
     def _animate_spinner(self):
-        if not self._load_cv.winfo_ismapped():
+        if self._state != "loading":
+            return
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
             return
         self._spin_idx = (self._spin_idx + 1) % len(self.SPIN)
-        self._load_cv.itemconfig(self._spin_item, text=self.SPIN[self._spin_idx])
+        self._cv.itemconfig(self._spin_item, text=self.SPIN[self._spin_idx])
         self.root.after(130, self._animate_spinner)
 
     # ── progress polling ──────────────────────────────────────
@@ -480,20 +498,18 @@ class KokoroController:
             s = int(s)
             return f"{s // 60}:{s % 60:02d}"
 
-        c = self._play_cv
-        c.itemconfig(self._pos_item, text=fmt(pos))
-        c.itemconfig(self._dur_item, text=fmt(dur))
+        cv = self._cv
+        cv.itemconfig(self._pos_item, text=fmt(pos))
+        cv.itemconfig(self._dur_item, text=fmt(dur))
 
-        # Slide cover to reveal gradient
         frac   = min(pos / dur, 1.0) if dur > 0 else 0.0
         filled = int(self._pw * frac)
-        c.coords(self._prog_cover,
-                 self._px + 1 + filled, self._py + 1,
-                 self._px + self._pw - 1, self._py + self._ph - 1)
+        cv.coords(self._prog_cover,
+                  self._px + 1 + filled, self._py + 1,
+                  self._px + self._pw - 1, self._py + self._ph - 1)
 
-        # Play / pause icon
         icon = "⏸" if self.player.is_playing else "▶"
-        c.itemconfig("btn_play_txt", text=icon)
+        cv.itemconfig("btn_play_txt", text=icon)
 
         self.root.after(100, self._update_progress)
 
@@ -501,7 +517,7 @@ class KokoroController:
     def _toggle_play(self):
         if self.player:
             playing = self.player.toggle()
-            self._play_cv.itemconfig("btn_play_txt", text="⏸" if playing else "▶")
+            self._cv.itemconfig("btn_play_txt", text="⏸" if playing else "▶")
 
     def _rewind(self):
         if self.player:
@@ -512,13 +528,12 @@ class KokoroController:
             self.player.seek(10)
 
     def _handle_end(self):
-        c = self._play_cv
-        c.itemconfig("btn_play_txt", text="▶")
-        c.itemconfig(self._pos_item, text="0:00")
-        # Reset cover to full width (hide gradient)
-        c.coords(self._prog_cover,
-                 self._px + 1, self._py + 1,
-                 self._px + self._pw - 1, self._py + self._ph - 1)
+        cv = self._cv
+        cv.itemconfig("btn_play_txt", text="▶")
+        cv.itemconfig(self._pos_item, text="0:00")
+        cv.coords(self._prog_cover,
+                  self._px + 1, self._py + 1,
+                  self._px + self._pw - 1, self._py + self._ph - 1)
 
     def _close(self, _event=None):
         if self.player:
@@ -530,22 +545,37 @@ class KokoroController:
                 pass
         self.root.destroy()
 
-    # ── dragging ──────────────────────────────────────────────
-    def _drag_start(self, event):
-        # Don't start drag if clicking the close button
-        item = self._title_cv.find_closest(event.x, event.y)
-        if item and any(t.startswith("cls_") for t in self._title_cv.gettags(item[0])):
+    # ── drag / click ──────────────────────────────────────────
+    def _on_click(self, event):
+        x, y = event.x, event.y
+        # Title bar → drag (skip close button)
+        if y < self.H_TITLE:
+            item = self._cv.find_closest(x, y)
+            if item and any(t.startswith("cls_") for t in self._cv.gettags(item[0])):
+                return
+            self._drag_ref = (
+                event.x_root - self.root.winfo_x(),
+                event.y_root - self.root.winfo_y(),
+            )
             return
-        self._drag_ref = (
-            event.x_root - self.root.winfo_x(),
-            event.y_root - self.root.winfo_y(),
-        )
+        # Content → seek or button
+        self._drag_ref = None
+        if (self._px <= x <= self._px + self._pw and
+                self._py - 6 <= y <= self._py + self._ph + 6):
+            if self.player:
+                self.player.seek_to(max(0.0, min(1.0, (x - self._px) / self._pw)))
+            return
+        actions = {"rew": self._rewind, "play": self._toggle_play, "fwd": self._forward}
+        for name, (x1, y1, x2, y2) in self._btn_boxes.items():
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                actions[name]()
+                return
 
-    def _drag_move(self, event):
+    def _on_drag(self, event):
         if self._drag_ref:
-            x = event.x_root - self._drag_ref[0]
-            y = event.y_root - self._drag_ref[1]
-            self.root.geometry(f"+{x}+{y}")
+            self.root.geometry(
+                f"+{event.x_root - self._drag_ref[0]}+{event.y_root - self._drag_ref[1]}"
+            )
 
     # ── entry point ───────────────────────────────────────────
     def run(self, text, voice, speed):
@@ -579,7 +609,7 @@ class KokoroController:
     def _on_generated(self, wav_path):
         self.player = AudioPlayer(wav_path)
         self.player.play()
-        self._show_playback()
+        self._set_state("playback")
 
 
 # ════════════════════════════════════════════════════════════
