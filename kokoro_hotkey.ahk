@@ -34,17 +34,26 @@ global activePID := 0
     Send "^c"
     if !ClipWait(1) {
         A_Clipboard := savedClip
+        TrayTip("Kokoro TTS", "No text selected — select some text first", 2)
         return
     }
     text := A_Clipboard
     A_Clipboard := savedClip
 
-    if (Trim(text) = "")
+    if (Trim(text) = "") {
+        TrayTip("Kokoro TTS", "Clipboard was empty after copy", 2)
         return
+    }
 
     ; Write to temp file — avoids all shell quoting/escaping issues
     try FileDelete(TMPFILE)
     FileAppend(text, TMPFILE, "UTF-8")
+
+    ; Verify python and script exist before launching
+    if !FileExist(PYTHON) {
+        TrayTip("Kokoro TTS", "ERROR: pythonw.exe not found at:`n" . PYTHON, 3)
+        return
+    }
 
     ; Launch player (pythonw = no console window)
     cmd := '"' . PYTHON . '" "' . SCRIPT . '"'
@@ -53,6 +62,7 @@ global activePID := 0
         . ' --speed ' . SPEED
         . ' --play'
 
+    TrayTip("Kokoro TTS", "Generating audio...", 2)
     Run(cmd, , "Hide", &activePID)
 }
 
