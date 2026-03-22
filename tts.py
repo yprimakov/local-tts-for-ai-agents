@@ -156,7 +156,7 @@ class AudioPlayer:
 #  KokoroController  —  dark glass card player window
 # ════════════════════════════════════════════════════════════
 class KokoroController:
-    W         = 300
+    W         = 256
     H_TITLE   = 38
     H_CONTENT = 108
     RADIUS    = 12
@@ -409,9 +409,9 @@ class KokoroController:
         # Control buttons
         btn_y = ty + self.H_CONTENT - 24
         mid   = self.W // 2
-        self._draw_btn(cv, mid - 72, btn_y, 56, 24, "« 10", "rew")
-        self._draw_btn(cv, mid,      btn_y, 44, 24, "▶",    "play", accent=True)
-        self._draw_btn(cv, mid + 72, btn_y, 56, 24, "10 »", "fwd")
+        self._draw_btn(cv, mid - 60, btn_y, 50, 24, "« 10", "rew")
+        self._draw_btn(cv, mid,      btn_y, 40, 24, "▶",    "play", accent=True)
+        self._draw_btn(cv, mid + 60, btn_y, 50, 24, "10 »", "fwd")
 
     def _draw_btn(self, cv, cx, cy, w, h, label, name, accent=False):
         r  = h // 2
