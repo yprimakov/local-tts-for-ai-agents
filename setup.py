@@ -186,7 +186,8 @@ def patch_settings():
         except json.JSONDecodeError:
             print("  Warning: existing settings.json could not be parsed — starting fresh")
 
-    hook_command = str(HOOK_LAUNCHER)
+    # Use forward slashes — Claude Code runs hooks via bash, which strips backslashes
+    hook_command = str(HOOK_LAUNCHER).replace("\\", "/")
     new_hook = {"type": "command", "command": hook_command, "timeout": 10}
 
     hooks    = settings.setdefault("hooks", {})
