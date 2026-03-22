@@ -156,10 +156,10 @@ class AudioPlayer:
 #  KokoroController  —  dark glass card player window
 # ════════════════════════════════════════════════════════════
 class KokoroController:
-    W         = 340
-    H_TITLE   = 48
-    H_CONTENT = 130
-    RADIUS    = 14
+    W         = 300
+    H_TITLE   = 38
+    H_CONTENT = 108
+    RADIUS    = 12
 
     # Transparent key — unique near-black, never used in the card
     TRANS_KEY = "#010101"
@@ -343,8 +343,8 @@ class KokoroController:
 
     def _build_loading_items(self, cv):
         cy = self.H_TITLE + self.H_CONTENT // 2
-        sx = self.W // 2 - 58
-        sr = 20
+        sx = self.W // 2 - 48
+        sr = 17
         cv.create_oval(sx - sr, cy - sr, sx + sr, cy + sr,
                        fill=self.C_BTN, outline=self.C_BTN_BD,
                        tags="loading")
@@ -360,9 +360,9 @@ class KokoroController:
 
     def _build_playback_items(self, cv):
         ty        = self.H_TITLE
-        px, py    = 18, ty + 18
-        pw        = self.W - 36
-        ph        = 6
+        px, py    = 14, ty + 13
+        pw        = self.W - 28
+        ph        = 5
         self._px, self._py, self._pw, self._ph = px, py, pw, ph
 
         # Progress track
@@ -407,11 +407,11 @@ class KokoroController:
         )
 
         # Control buttons
-        btn_y = ty + self.H_CONTENT - 30
+        btn_y = ty + self.H_CONTENT - 24
         mid   = self.W // 2
-        self._draw_btn(cv, mid - 84, btn_y, 64, 28, "« 10", "rew")
-        self._draw_btn(cv, mid,      btn_y, 50, 28, "▶",    "play", accent=True)
-        self._draw_btn(cv, mid + 84, btn_y, 64, 28, "10 »", "fwd")
+        self._draw_btn(cv, mid - 72, btn_y, 56, 24, "« 10", "rew")
+        self._draw_btn(cv, mid,      btn_y, 44, 24, "▶",    "play", accent=True)
+        self._draw_btn(cv, mid + 72, btn_y, 56, 24, "10 »", "fwd")
 
     def _draw_btn(self, cv, cx, cy, w, h, label, name, accent=False):
         r  = h // 2
