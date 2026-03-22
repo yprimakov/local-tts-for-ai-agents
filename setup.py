@@ -58,6 +58,7 @@ PACKAGES_COMMON = [
     "kokoro-onnx",
     "sounddevice",
     "soundfile",
+    "Pillow",       # gradient/glow rendering in the playback controller UI
 ]
 
 PACKAGES_WINDOWS = [

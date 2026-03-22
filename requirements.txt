@@ -2,7 +2,12 @@ kokoro-onnx
 onnxruntime
 sounddevice
 soundfile
+Pillow
 
 # Note: onnxruntime-directml is NOT used. It has a known bug with Kokoro's
 # ConvTranspose operation and causes DLL init hangs on some AMD/Windows systems.
 # Plain onnxruntime with CPUExecutionProvider is ~6x realtime and sufficient.
+#
+# Pillow is used by the playback controller for the orange→amber gradient
+# progress bar and the bottom glow accent. The UI degrades gracefully if
+# Pillow is unavailable (solid colour fallback).
