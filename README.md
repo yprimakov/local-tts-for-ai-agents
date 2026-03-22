@@ -1,48 +1,89 @@
 # Local TTS for AI Agents
 
-Offline, GPU-accelerated text-to-speech powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M), with deep integration into [Claude Code](https://claude.ai/code).
+Offline, GPU-accelerated text-to-speech powered by [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M).
 
-**Key features:**
-- Fully offline after setup — no API keys, no cloud calls
-- ~6× faster than real-time on CPU alone
-- Draggable playback controller — dark glass card UI with rounded corners, orange→amber gradient progress bar, pause/seek/±10s skip
-- Claude Code hook: every response is spoken as a short voice blurb
-- Global hotkeys via AutoHotkey (Windows only)
-- Single-command install on Windows and macOS
+Designed to be installed and operated by AI agents. Works as a standalone CLI tool, a Claude Code voice service, or a general-purpose TTS backend.
 
 ---
 
-## For AI Agents: Installation Instructions
+## What it does
 
-> These instructions are written to be executed autonomously. Follow each step exactly. Verify expected outputs before proceeding.
+- **Voice responses for Claude Code** — a Stop hook reads a short summary of every response aloud
+- **On-demand TTS** — read any selected text via a global hotkey (`Ctrl+Alt+R` on Windows)
+- **Playback controller** — compact dark-glass floating window with pause, seek, and ±10s skip
+- **Fully offline** — no API keys, no cloud calls; model runs locally at ~6× real-time on CPU
+- **All platforms** — Windows, macOS, Linux
 
-### Prerequisites
+---
 
-#### Windows
+## Using this as a TTS service for AI agents
 
-| Requirement | Version | How to verify |
-|---|---|---|
-| Windows 10/11 | — | `ver` in cmd |
-| Python | 3.10 or newer | `python --version` |
-| Internet connection | — | Required for first-run model download only |
-| AutoHotkey v2 *(optional)* | v2.x | https://www.autohotkey.com |
+### Claude Code voice responses
 
-Python must be on `PATH`. If `python --version` fails, download from https://www.python.org/downloads/ and check "Add to PATH" during install.
+After installation, Claude Code will automatically speak a short voice summary at the end of every response. The hook fires on the built-in `Stop` event and requires no configuration beyond the initial setup.
 
-#### macOS
+Enable or disable voice responses at any time:
 
-| Requirement | Version | How to verify |
-|---|---|---|
-| macOS | 12 Monterey or newer | `sw_vers` |
-| Python | 3.10 or newer | `python3 --version` |
-| Xcode Command Line Tools | — | `xcode-select --install` (if not already installed) |
-| Internet connection | — | Required for first-run model download only |
-
-PortAudio is required by `sounddevice`. Install via Homebrew:
-```bash
-brew install portaudio
 ```
-If Homebrew is not installed: https://brew.sh
+/voice          ← toggle on/off
+/voice on
+/voice off
+```
+
+Or toggle the flag file directly:
+
+| Platform | Enable | Disable |
+|---|---|---|
+| Windows | `type nul > "%USERPROFILE%\.claude\voice_enabled"` | `del "%USERPROFILE%\.claude\voice_enabled"` |
+| macOS / Linux | `touch ~/.claude/voice_enabled` | `rm ~/.claude/voice_enabled` |
+
+### Using from any AI agent or script
+
+Any agent can invoke the TTS engine directly:
+
+```bash
+# Speak text silently (no window, blocks until audio finishes)
+venv/bin/python tts.py "Your message here" --autoplay
+
+# Show the interactive playback controller
+venv/bin/python tts.py "Your message here" --play
+
+# Save to WAV file
+venv/bin/python tts.py "Your message here" --out output.wav
+```
+
+Windows uses `venv\Scripts\python.exe` instead of `venv/bin/python`.
+
+---
+
+## Installation
+
+### Prerequisites by platform
+
+**Windows 10/11**
+
+| Requirement | Notes |
+|---|---|
+| Python 3.10+ | [python.org](https://www.python.org/downloads/) — check "Add to PATH" during install |
+| Git | [git-scm.com](https://git-scm.com/) or `winget install Git.Git` |
+| AutoHotkey v2 *(optional)* | [autohotkey.com](https://www.autohotkey.com) — required for global hotkeys only |
+
+**macOS 12+**
+
+| Requirement | Notes |
+|---|---|
+| Python 3.10+ | `brew install python` or [python.org](https://www.python.org/downloads/) |
+| Git | Included with Xcode Command Line Tools: `xcode-select --install` |
+| PortAudio | `brew install portaudio` — required by `sounddevice` |
+
+**Linux (Ubuntu/Debian and derivatives)**
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-venv python3-tk portaudio19-dev git
+```
+
+For other distributions, install the equivalents of the above. `python3-tk` is required for the playback controller GUI. `portaudio19-dev` is required by `sounddevice`.
 
 ---
 
@@ -53,8 +94,6 @@ git clone https://github.com/yprimakov/local-tts-for-ai-agents.git
 cd local-tts-for-ai-agents
 ```
 
-**Expected:** Directory contains `setup.py`, `tts.py`, `tts_hook.py`, `kokoro_hotkey.ahk`.
-
 ---
 
 ### Step 2 — Run setup
@@ -64,218 +103,184 @@ cd local-tts-for-ai-agents
 python setup.py
 ```
 
-**macOS:**
+**macOS / Linux:**
 ```bash
 python3 setup.py
 ```
 
-This command:
-1. Creates `./venv/` — Python virtual environment
-2. Installs packages: `kokoro-onnx`, `onnxruntime`, `sounddevice`, `soundfile`, `Pillow`
-3. Downloads model files into `./models/` (~355 MB total, one-time)
+This single command:
+1. Creates a Python virtual environment at `./venv/`
+2. Installs all required packages: `kokoro-onnx`, `onnxruntime`, `sounddevice`, `soundfile`, `Pillow`
+3. Downloads the Kokoro-82M model files into `./models/` (~355 MB, one-time)
    - `kokoro-v1.0.onnx` (325 MB)
    - `voices-v1.0.bin` (28 MB)
-4. Writes `./kokoro_hook.bat` (Windows) or `./kokoro_hook.sh` (macOS) with the correct paths for this install location
+4. Writes `./kokoro_hook.bat` (Windows) or `./kokoro_hook.sh` (macOS/Linux) with absolute paths for this install location
 5. Patches `~/.claude/settings.json` to register the Claude Code Stop hook
 
 **Expected output ends with:** `Setup complete!`
 
 **If setup fails:**
-- Package install error → check internet connection, retry
-- macOS `sounddevice` error → run `brew install portaudio` first
-- Model download error → GitHub releases may be temporarily unavailable, retry
-- settings.json error → ensure `~/.claude/` directory exists (it is created by Claude Code on first run)
+
+| Error | Fix |
+|---|---|
+| Package install error | Check internet connection; retry |
+| `sounddevice` build error on macOS | Run `brew install portaudio` first |
+| `sounddevice` build error on Linux | Run `sudo apt install portaudio19-dev python3-dev` first |
+| Model download error | GitHub releases temporarily unavailable; retry |
+| `settings.json` error | Run Claude Code once first to create `~/.claude/`, then retry |
 
 ---
 
 ### Step 3 — Restart Claude Code
 
-The Stop hook is loaded at startup. **Restart any running Claude Code instances** for the hook to take effect.
+The Stop hook is registered at startup. **Restart any running Claude Code instances** for it to take effect.
 
-**Verify the hook is registered:**
+Verify the hook is registered:
 
-Windows:
+**Windows:**
 ```bash
-python -c "import json; s=json.load(open(r'%USERPROFILE%\.claude\settings.json')); print(s.get('hooks', {}).get('Stop', 'NOT FOUND'))"
+python -c "import json; s=json.load(open(r'%USERPROFILE%\.claude\settings.json')); print(s.get('hooks',{}).get('Stop','NOT FOUND'))"
 ```
 
-macOS:
+**macOS / Linux:**
 ```bash
-python3 -c "import json, os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'))); print(s.get('hooks', {}).get('Stop', 'NOT FOUND'))"
+python3 -c "import json,os; s=json.load(open(os.path.expanduser('~/.claude/settings.json'))); print(s.get('hooks',{}).get('Stop','NOT FOUND'))"
 ```
 
-Expected: a list containing an entry with `kokoro_hook` in the command path.
+Expected output: a list containing an entry with `kokoro_hook` in the command path.
 
 ---
 
 ### Step 4 — Enable voice responses
 
-Voice responses are controlled by a toggle file. Create it to enable:
+Voice responses are off by default. Create the toggle file to enable them:
 
 **Windows:**
 ```bash
-# Enable
 type nul > "%USERPROFILE%\.claude\voice_enabled"
-
-# Disable
-del "%USERPROFILE%\.claude\voice_enabled"
 ```
 
-**macOS:**
+**macOS / Linux:**
 ```bash
-# Enable
 touch ~/.claude/voice_enabled
-
-# Disable
-rm ~/.claude/voice_enabled
-```
-
-**Verify (Windows):**
-```bash
-if exist "%USERPROFILE%\.claude\voice_enabled" (echo ON) else (echo OFF)
-```
-
-**Verify (macOS):**
-```bash
-[ -f ~/.claude/voice_enabled ] && echo ON || echo OFF
 ```
 
 ---
 
-### Step 5 — (Optional) Set up global hotkeys
+### Step 5 — (Optional) Global hotkeys — Windows only
 
-**Windows only.** Double-click `kokoro_hotkey.ahk` to activate hotkeys. Requires AutoHotkey v2.
+Double-click `kokoro_hotkey.ahk` to activate. Requires AutoHotkey v2.
 
-**Verify:** The AutoHotkey icon (green H) appears in the system tray.
-
-To start hotkeys automatically with Windows:
+To start hotkeys automatically with Windows, run this once:
 ```bash
-# Creates a shortcut in the Windows Startup folder
 powershell -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut([Environment]::GetFolderPath('Startup')+'\kokoro_hotkey.lnk');$s.TargetPath='%CD%\kokoro_hotkey.ahk';$s.Save()"
 ```
 
-macOS: AutoHotkey is not available. Use the CLI directly (see Usage section).
+macOS / Linux: AutoHotkey is not available. Use the CLI directly or assign system shortcuts to shell commands.
 
 ---
 
-### Verification — End-to-end test
+### Verification — end-to-end test
 
-Run this and confirm you hear audio output:
+Run this and confirm you hear audio:
 
 **Windows:**
 ```bash
 venv\Scripts\python.exe tts.py "Setup is complete. Local TTS is working correctly." --play
 ```
 
-**macOS:**
+**macOS / Linux:**
 ```bash
 venv/bin/python tts.py "Setup is complete. Local TTS is working correctly." --play
 ```
 
-**Expected:** A player window appears, audio plays, the playback controller shows a moving progress bar.
+Expected: a floating playback controller appears, audio plays, the progress bar moves.
 
 Test the Claude Code hook directly:
 
 **Windows:**
 ```bash
-echo {"session_id":"test","stop_hook_active":false,"last_assistant_message":"Setup verified. Voice responses are now active."} | venv\Scripts\python.exe tts_hook.py
+echo {"session_id":"test","stop_hook_active":false,"last_assistant_message":"Voice responses are now active."} | venv\Scripts\python.exe tts_hook.py
 ```
 
-**macOS:**
+**macOS / Linux:**
 ```bash
-echo '{"session_id":"test","stop_hook_active":false,"last_assistant_message":"Setup verified. Voice responses are now active."}' | venv/bin/python tts_hook.py
+echo '{"session_id":"test","stop_hook_active":false,"last_assistant_message":"Voice responses are now active."}' | venv/bin/python tts_hook.py
 ```
 
-**Expected:** Audio plays within ~2 seconds (model load + generation).
-
----
-
-## File Structure
-
-```
-local-tts-for-ai-agents/
-├── setup.py              ← one-command installer (Windows + macOS)
-├── tts.py                ← TTS engine + playback controller UI
-├── tts_hook.py           ← Claude Code Stop hook script
-├── kokoro_hotkey.ahk     ← AutoHotkey global hotkeys (Windows only)
-├── doctor.bat            ← diagnostic script — double-click to check install health
-├── kokoro_hook.bat       ← generated by setup.py on Windows
-├── kokoro_hook.sh        ← generated by setup.py on macOS
-├── requirements.txt      ← package list (reference only; setup.py installs)
-├── brand/
-│   └── logo/
-│       └── iMadeFire-simple-white-on-black-v2.svg   ← optional title bar logo
-├── models/               ← downloaded by setup.py (gitignored)
-│   ├── kokoro-v1.0.onnx
-│   └── voices-v1.0.bin
-└── venv/                 ← Python venv, created by setup.py (gitignored)
-```
+Expected: audio plays within ~2 seconds.
 
 ---
 
 ## Usage
 
-### Command-line TTS
+### Command-line reference
 
-**Windows:**
 ```bash
-venv\Scripts\python.exe tts.py "Your text here" --play
-venv\Scripts\python.exe tts.py --file myfile.txt --play
-venv\Scripts\python.exe tts.py "Hello" --voice am_adam --speed 1.1 --out hello.wav
-venv\Scripts\python.exe tts.py --list-voices
-venv\Scripts\python.exe tts.py --file input.txt --autoplay
+# Interactive playback controller
+python tts.py "Hello world" --play
+
+# Speak silently, no window (used by hooks and agents)
+python tts.py "Hello world" --autoplay
+
+# Save to file
+python tts.py "Hello world" --out hello.wav
+
+# Read from file
+python tts.py --file input.txt --play
+
+# Choose voice and speed
+python tts.py "Hello" --voice am_adam --speed 1.1 --play
+
+# List available voices
+python tts.py --list-voices
 ```
 
-**macOS:**
-```bash
-venv/bin/python tts.py "Your text here" --play
-venv/bin/python tts.py --file myfile.txt --play
-venv/bin/python tts.py "Hello" --voice am_adam --speed 1.1 --out hello.wav
-venv/bin/python tts.py --list-voices
-venv/bin/python tts.py --file input.txt --autoplay
-```
+Use `venv\Scripts\python.exe` (Windows) or `venv/bin/python` (macOS/Linux) to ensure the correct environment.
 
-### Global Hotkeys (Windows + AutoHotkey v2 required)
+---
+
+### Playback controller
+
+The controller is a compact floating window (256×146 px) with a dark glass card design. It appears in the bottom-right corner and stays above other windows.
+
+| Control | Action |
+|---|---|
+| Drag title bar | Reposition the window |
+| Click / drag progress bar | Seek to position |
+| `▶` / `⏸` | Play / pause |
+| `« 10` | Rewind 10 seconds |
+| `10 »` | Fast-forward 10 seconds |
+| `✕` | Close |
+
+The title bar shows the iMadeFire brand logo if `svglib` and `reportlab` are installed, otherwise a styled text fallback. See [SVG logo not showing](#svg-logo-not-showing-in-the-title-bar) below.
+
+---
+
+### Global hotkeys (Windows + AutoHotkey v2)
 
 | Hotkey | Action |
 |---|---|
-| `Ctrl+Alt+R` | Read selected text — opens the TTS player |
+| `Ctrl+Alt+R` | Read selected text — opens the playback controller |
 | `Ctrl+Alt+V` | Toggle Claude Code voice responses on/off |
 | `Ctrl+Alt+S` | Stop playback immediately |
 
-macOS: AutoHotkey is not available. Use the CLI or assign system shortcuts to shell commands as needed.
+---
 
-### Playback Controller
+### Voice responses in Claude Code
 
-The controller appears when using `--play` or `Ctrl+Alt+R`. It is a compact dark glass card (256×146 px) with rounded corners that floats above other windows in the bottom-right corner of the screen.
+When `~/.claude/voice_enabled` exists, the Stop hook generates and plays a short voice summary at the end of every Claude Code response. The blurb is the last paragraph of the message, with markdown stripped, capped at ~300 characters.
 
-- **Drag** the title bar to reposition
-- **Click or drag the progress bar** to seek
-- **`▶` / `⏸`** — play / pause
-- **`« 10`** — rewind 10 seconds
-- **`10 »`** — fast-forward 10 seconds
-- **`✕`** — close
-
-The title bar shows the iMadeFire brand logo (rendered from `brand/logo/iMadeFire-simple-white-on-black-v2.svg` via `svglib` if installed, otherwise a styled text fallback). The progress bar uses a Pillow-generated orange→amber gradient with an ambient glow accent at the card bottom.
-
-### Voice Responses in Claude Code
-
-When `~/.claude/voice_enabled` exists, Claude Code will speak a short summary at the end of every response. The blurb is extracted from the last paragraph of the message (markdown stripped, capped at ~300 characters).
-
-Toggle from within any Claude Code session:
+Toggle from within a Claude Code session:
 ```
 /voice          ← toggle
 /voice on       ← enable
 /voice off      ← disable
 ```
 
-Or toggle the file directly:
-- **Windows:** `Ctrl+Alt+V` (AutoHotkey) — or create/delete `%USERPROFILE%\.claude\voice_enabled`
-- **macOS:** `touch ~/.claude/voice_enabled` (on) / `rm ~/.claude/voice_enabled` (off)
-
 ---
 
-## Available Voices
+## Available voices
 
 | ID | Description |
 |---|---|
@@ -299,76 +304,112 @@ Or toggle the file directly:
 | `bm_george` | British Male — formal, distinguished |
 | `bm_lewis` | British Male — casual, approachable |
 
-Change the default voice by editing the top of `kokoro_hotkey.ahk`:
+Change the default voice in `kokoro_hotkey.ahk`:
 ```ahk
 VOICE := "am_adam"
 SPEED := "1.1"
 ```
 
-Or in the Claude Code hook, set the `--voice` flag in `kokoro_hook.bat`.
+Or pass `--voice` and `--speed` on the CLI.
 
 ---
 
 ## Troubleshooting
 
+### Run the diagnostic script first (Windows)
+
+Double-click `doctor.bat` to check the full install state: venv, models, packages, hook registration, voice toggle, and a live audio test.
+
 ### No audio after setup
 
-**Windows:**
-1. Check the hook log: `type %TEMP%\kokoro_hook.log`
-2. Test autoplay directly: `venv\Scripts\python.exe tts.py "test" --autoplay`
-3. Ensure Claude Code was restarted after setup
+1. Check the hook log:
+   - Windows: `type %TEMP%\kokoro_hook.log`
+   - macOS / Linux: `cat /tmp/kokoro_hook.log`
+2. Test autoplay directly:
+   - Windows: `venv\Scripts\python.exe tts.py "test" --autoplay`
+   - macOS / Linux: `venv/bin/python tts.py "test" --autoplay`
+3. Confirm Claude Code was restarted after setup
 
-**macOS:**
-1. Check the hook log: `cat /tmp/kokoro_hook.log`
-2. Test autoplay directly: `venv/bin/python tts.py "test" --autoplay`
-3. Ensure Claude Code was restarted after setup
+### Hook not firing (log file empty after Claude responds)
 
-### Hook is not firing (log file empty after Claude responds)
-
-1. Verify settings.json contains the hook: check `~/.claude/settings.json`
-2. Re-run `python setup.py` (or `python3 setup.py` on macOS) to re-patch
+1. Check `~/.claude/settings.json` for an entry containing `kokoro_hook`
+2. Re-run `python setup.py` (or `python3 setup.py`) to re-patch
 3. Restart Claude Code
 
-### Voice responses enabled but nothing plays
+### `stop_hook error: command not found`
 
-**Windows:** `if exist "%USERPROFILE%\.claude\voice_enabled" echo ON`
+The hook path in `settings.json` must use forward slashes, not backslashes. Re-run `setup.py` — it writes the path correctly. If editing manually, use forward slashes: `C:/path/to/kokoro_hook.bat`.
 
-**macOS:** `[ -f ~/.claude/voice_enabled ] && echo ON || echo OFF`
+### Voice toggle is on but nothing plays
+
+Verify the flag file exists:
+- Windows: `if exist "%USERPROFILE%\.claude\voice_enabled" (echo ON) else (echo OFF)`
+- macOS / Linux: `[ -f ~/.claude/voice_enabled ] && echo ON || echo OFF`
 
 ### SVG logo not showing in the title bar
 
-The logo requires `svglib` and `reportlab` (not installed by default). Without them, a styled text fallback is used automatically — this is expected behaviour. To render the actual SVG:
+A styled text fallback is shown automatically when `svglib`/`reportlab` are not installed — this is expected. To render the actual SVG logo:
 
 ```bash
 venv\Scripts\pip.exe install svglib reportlab   # Windows
-venv/bin/pip install svglib reportlab           # macOS
+venv/bin/pip install svglib reportlab           # macOS / Linux
 ```
 
-### Running the diagnostic script
+### `sounddevice` error on macOS
 
-Double-click `doctor.bat` (Windows) to check the full install state: venv, models, packages, hook registration, voice toggle, and a live audio test.
-
-### sounddevice error on macOS
-
-Install PortAudio via Homebrew:
 ```bash
 brew install portaudio
-pip install --force-reinstall sounddevice
+venv/bin/pip install --force-reinstall sounddevice
 ```
 
-### GPU acceleration
+### `sounddevice` error on Linux
 
-Both Windows and macOS use standard `onnxruntime` (CPU execution). CPU inference is ~6× faster than real-time and suitable for all use cases. `onnxruntime-directml` is not used — it has a known bug with Kokoro's ConvTranspose operation and causes initialization hangs on some AMD/Windows systems.
+```bash
+sudo apt install portaudio19-dev python3-dev
+venv/bin/pip install --force-reinstall sounddevice
+```
+
+### Playback controller window does not appear (Linux)
+
+Tkinter may not be installed:
+```bash
+sudo apt install python3-tk
+```
 
 ---
 
-## Platform Support
+## File structure
 
-| Platform | Status |
-|---|---|
-| Windows 10/11 | Fully supported (TTS core + Claude Code hook + AutoHotkey hotkeys) |
-| macOS 12+ | Supported (TTS core + Claude Code hook; no AutoHotkey) |
-| Linux | Not supported |
+```
+local-tts-for-ai-agents/
+├── setup.py              ← one-command installer (Windows, macOS, Linux)
+├── tts.py                ← TTS engine + playback controller UI
+├── tts_hook.py           ← Claude Code Stop hook script
+├── kokoro_hotkey.ahk     ← AutoHotkey global hotkeys (Windows only)
+├── doctor.bat            ← diagnostic script — double-click to check install health
+├── kokoro_hook.bat       ← generated by setup.py on Windows
+├── kokoro_hook.sh        ← generated by setup.py on macOS / Linux
+├── requirements.txt      ← package list (reference; setup.py handles install)
+├── brand/
+│   └── logo/
+│       └── iMadeFire-simple-white-on-black-v2.svg
+├── models/               ← downloaded by setup.py (gitignored)
+│   ├── kokoro-v1.0.onnx
+│   └── voices-v1.0.bin
+└── venv/                 ← created by setup.py (gitignored)
+```
+
+---
+
+## Platform support
+
+| Platform | TTS core | Claude Code hook | Playback controller | Global hotkeys |
+|---|---|---|---|---|
+| Windows 10/11 | ✓ | ✓ | ✓ | ✓ (AutoHotkey v2) |
+| macOS 12+ | ✓ | ✓ | ✓ | — |
+| Linux (Ubuntu 22.04+) | ✓ | ✓ | ✓ | — |
+
+GPU acceleration: all platforms use standard `onnxruntime` with `CPUExecutionProvider`. CPU inference runs at ~6× real-time, which is sufficient for all use cases. `onnxruntime-directml` is explicitly excluded — it has a known bug with Kokoro's ConvTranspose operation that causes initialization hangs on some AMD/Windows systems.
 
 ---
 

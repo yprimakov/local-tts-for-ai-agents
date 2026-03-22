@@ -13,7 +13,10 @@ What this does:
   5. Patches ~/.claude/settings.json to register the Stop hook
 
 Prerequisites: Python 3.10+, internet connection for first run.
-Supported platforms: Windows 10/11, macOS 12+.
+Supported platforms: Windows 10/11, macOS 12+, Linux (Ubuntu 22.04+ or equivalent).
+
+Linux additional prerequisites (install before running setup.py):
+    sudo apt install python3-tk portaudio19-dev python3-dev
 """
 
 import json
@@ -27,6 +30,7 @@ from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
 IS_MAC     = sys.platform == "darwin"
+IS_LINUX   = sys.platform.startswith("linux")
 
 # -- paths -----------------------------------------------------
 REPO_DIR        = Path(__file__).parent.resolve()
@@ -67,10 +71,19 @@ PACKAGES_WINDOWS = [
 ]
 
 PACKAGES_MAC = [
-    "onnxruntime",           # Standard ONNX Runtime for macOS
+    "onnxruntime",
 ]
 
-PACKAGES = PACKAGES_COMMON + (PACKAGES_WINDOWS if IS_WINDOWS else PACKAGES_MAC)
+PACKAGES_LINUX = [
+    "onnxruntime",
+]
+
+if IS_WINDOWS:
+    PACKAGES = PACKAGES_COMMON + PACKAGES_WINDOWS
+elif IS_MAC:
+    PACKAGES = PACKAGES_COMMON + PACKAGES_MAC
+else:
+    PACKAGES = PACKAGES_COMMON + PACKAGES_LINUX
 
 
 # -- helpers ---------------------------------------------------
@@ -110,7 +123,8 @@ def check_python():
 
 
 def create_venv():
-    if (VENV_DIR / "Scripts" / "python.exe").exists():
+    marker = (VENV_DIR / "Scripts" / "python.exe") if IS_WINDOWS else (VENV_DIR / "bin" / "python")
+    if marker.exists():
         ok(f"venv already exists at {VENV_DIR}")
         return
     print(f"  Creating venv at {VENV_DIR} ...")
