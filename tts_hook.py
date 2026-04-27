@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import unicodedata
 
 # ── config ────────────────────────────────────────────────────
 TOGGLE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "voice_enabled")
@@ -29,6 +30,74 @@ LOG_FILE   = os.path.join(tempfile.gettempdir(), "kokoro_hook.log")
 
 MAX_CHARS  = 300   # ~2-3 sentences
 MIN_CHARS  = 12    # skip if too short to bother
+
+
+# ── text normalization for Kokoro / espeak-ng ─────────────────
+# Map Unicode punctuation/symbols to safe ASCII equivalents.
+# espeak-ng pronounces unknown codepoints by Unicode name (e.g. "•" → "bullet"),
+# which sounds bad. We normalize to characters the phonemizer handles cleanly.
+_TTS_CHAR_MAP = {
+    # Dashes → comma for a natural pause
+    "\u2014": ", ",  # — em-dash
+    "\u2013": ", ",  # – en-dash
+    "\u2015": ", ",  # ― horizontal bar
+    "\u2212": "-",   # − minus sign
+    # Quotes → straight ASCII
+    "\u2018": "'", "\u2019": "'", "\u201A": "'", "\u201B": "'",
+    "\u201C": '"', "\u201D": '"', "\u201E": '"', "\u201F": '"',
+    "\u00AB": '"', "\u00BB": '"',
+    "\u2039": "'", "\u203A": "'",
+    # Ellipsis → three dots (espeak handles this as a pause)
+    "\u2026": "...",
+    # Bullets and list glyphs → space
+    "\u2022": " ", "\u2023": " ", "\u25E6": " ",
+    "\u2043": " ", "\u204C": " ", "\u204D": " ",
+    "\u25AA": " ", "\u25AB": " ", "\u25CF": " ", "\u25CB": " ",
+    # Arrows → space
+    "\u2190": " ", "\u2192": " ", "\u2191": " ", "\u2193": " ",
+    "\u21D0": " ", "\u21D2": " ", "\u21D1": " ", "\u21D3": " ",
+    # Check marks / crosses → space
+    "\u2713": " ", "\u2714": " ", "\u2715": " ", "\u2717": " ", "\u2718": " ",
+    # Common typographic spaces → regular space
+    "\u00A0": " ", "\u2002": " ", "\u2003": " ", "\u2009": " ",
+    "\u200A": " ", "\u202F": " ", "\u205F": " ", "\u3000": " ",
+    # Zero-width / formatting characters → drop
+    "\u200B": "", "\u200C": "", "\u200D": "", "\uFEFF": "",
+}
+
+# Emoji and pictographic ranges — espeak reads these as Unicode names ("direct hit")
+_EMOJI_RE = re.compile(
+    "["
+    "\U0001F300-\U0001F5FF"  # symbols & pictographs
+    "\U0001F600-\U0001F64F"  # emoticons
+    "\U0001F680-\U0001F6FF"  # transport & map
+    "\U0001F700-\U0001F77F"  # alchemical
+    "\U0001F780-\U0001F7FF"  # geometric extended
+    "\U0001F800-\U0001F8FF"  # arrows-C
+    "\U0001F900-\U0001F9FF"  # supplemental symbols & pictographs
+    "\U0001FA00-\U0001FA6F"  # chess
+    "\U0001FA70-\U0001FAFF"  # symbols & pictographs ext-A
+    "\U00002600-\U000026FF"  # misc symbols
+    "\U00002700-\U000027BF"  # dingbats
+    "]+",
+    flags=re.UNICODE,
+)
+
+
+def normalize_for_tts(text: str) -> str:
+    """Clean text for Kokoro / espeak-ng to avoid Unicode-name mispronunciations."""
+    # NFKC: fold compatibility forms (fullwidth digits, ligatures, etc.)
+    text = unicodedata.normalize("NFKC", text)
+    # Strip emoji
+    text = _EMOJI_RE.sub(" ", text)
+    # Apply punctuation map
+    text = text.translate(str.maketrans(_TTS_CHAR_MAP))
+    # Drop any remaining non-printable / control chars (keep newlines and tabs)
+    text = "".join(c for c in text if c in "\n\t" or unicodedata.category(c)[0] != "C")
+    # Collapse runs of spaces and stray punctuation that may have doubled up
+    text = re.sub(r" {2,}", " ", text)
+    text = re.sub(r"(,\s*){2,}", ", ", text)
+    return text.strip()
 
 
 # ── blurb extractor ───────────────────────────────────────────
@@ -90,7 +159,10 @@ def main():
         return
 
     try:
-        raw = sys.stdin.read()
+        # Read stdin as raw bytes and decode as UTF-8 explicitly.
+        # Default text-mode stdin uses the Windows locale (cp1252), which
+        # mangles em-dashes and other non-ASCII into mojibake (e.g. "â€"").
+        raw = sys.stdin.buffer.read().decode("utf-8")
         data = json.loads(raw)
         with open(LOG_FILE, "a") as log:
             log.write(f"[tts_hook] parsed JSON, stop_hook_active={data.get('stop_hook_active')}\n")
@@ -108,6 +180,7 @@ def main():
         return
 
     blurb = extract_blurb(message)
+    blurb = normalize_for_tts(blurb)
     if len(blurb) < MIN_CHARS:
         return
 
