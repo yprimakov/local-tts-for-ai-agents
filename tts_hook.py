@@ -1,6 +1,8 @@
 """
 Claude Code Stop hook — speaks a short blurb of each response via Kokoro TTS.
 
+Do Not Disturb (Ember Launchpad): ~/.claude/voice_dnd pauses speech, optionally until a time.
+
 Toggle voice responses on/off:
   Create file:  ~/.claude/voice_enabled   (ON)
   Delete file:  ~/.claude/voice_enabled   (OFF)
@@ -17,6 +19,9 @@ import unicodedata
 
 # ── config ────────────────────────────────────────────────────
 TOGGLE_FILE = os.path.join(os.path.expanduser("~"), ".claude", "voice_enabled")
+# Do Not Disturb (set from Ember Launchpad): file present = muted. Content is an
+# epoch-ms end time, or empty for "until turned off". Expired files are removed here.
+DND_FILE = os.path.join(os.path.expanduser("~"), ".claude", "voice_dnd")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if sys.platform == "win32":
@@ -148,6 +153,23 @@ def extract_blurb(text: str) -> str:
 
 
 # ── main ──────────────────────────────────────────────────────
+def dnd_active() -> bool:
+    import time
+    try:
+        with open(DND_FILE, encoding="utf-8") as f:
+            raw = f.read().strip()
+    except OSError:
+        return False
+    if raw:
+        try:
+            if float(raw) <= time.time() * 1000:
+                os.remove(DND_FILE)
+                return False
+        except ValueError:
+            pass
+    return True
+
+
 def main():
     # Diagnostic: always log that we were called
     with open(LOG_FILE, "a") as log:
@@ -156,6 +178,11 @@ def main():
     if not os.path.exists(TOGGLE_FILE):
         with open(LOG_FILE, "a") as log:
             log.write(f"[tts_hook] disabled (no toggle file)\n")
+        return
+
+    if dnd_active():
+        with open(LOG_FILE, "a") as log:
+            log.write("[tts_hook] do not disturb\n")
         return
 
     try:
