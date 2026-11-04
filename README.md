@@ -428,9 +428,10 @@ The Stop hook no longer plays audio itself. It posts each blurb to one local dae
 - starts each one with where it came from ("From agentic os v2.", "From a pytest run.")
 - records replies from headless runs (`claude -p`, SDK) in history without speaking them
   (`voiced.py --speak-headless` or `VOICED_SPEAK_HEADLESS=1` to speak them too)
-- shows a small always-on-top player: now playing, Pause / Skip / Mute, and (expand with the arrow)
-  the queue and the last 7 days of voiceovers. Double-click a history row to replay it; right-click
-  it to copy `claude --resume <session>` for the session that said it. Drag to move. The X button (or Esc) hides it until the next voiceover starts; right-click the
+- shows a small always-on-top player. Idle, it is one line with the last voiceover and a replay button.
+  Playing, it shows the project, session, text, progress, play/pause and skip (Space, Right arrow).
+  The arrow opens Up next (hover a row to remove it) and the last 7 days, grouped by day: hover a row
+  for its replay button, click it for the full text, folder and a Copy resume command link. Drag to move. The X button (or Esc) hides it until the next voiceover starts; right-click the
   header to hide it for an hour even while speaking, or quit.
 - keeps history as text in `%LOCALAPPDATA%\local-tts\history.jsonl` (7 days; replays are synthesized again)
 
