@@ -50,6 +50,14 @@ def data_dir() -> Path:
     return p
 
 
+def log(msg: str) -> None:
+    try:
+        with (data_dir() / "voiced.log").open("a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------- where a reply came from
 _TEMP_HINTS = ("\\temp\\", "/tmp/", "/var/folders/", "\\appdata\\local\\temp")
 
@@ -161,6 +169,9 @@ class VoiceQueue:
         self._skip = threading.Event()
         self._cv = threading.Condition()
         self._stop = False
+        self.window = {"hidden": None}  # set by the player: None, "until next voiceover", "until HH:MM"
+        self.show_requested = False
+        self.hide_requested = False
 
     # -- intake
     def say(self, text: str, cwd: str = "", session_id: str = "", entrypoint: str = "",
@@ -246,7 +257,7 @@ class VoiceQueue:
             cur = dict(self.current) if self.current else None
             if cur and p is not None:
                 cur["position"], cur["duration"] = round(p.position, 1), round(p.duration, 1)
-            return {"paused": self.paused, "muted": self.muted, "current": cur,
+            return {"paused": self.paused, "muted": self.muted, "current": cur, "window": dict(self.window),
                     "queue": [dict(i) for i in self.queue]}
 
     def stop(self) -> None:
@@ -384,6 +395,8 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 elif a == "unmute": vq.set_muted(False)
                 elif a == "clear": vq.clear()
                 elif a == "remove": vq.remove(iid)
+                elif a == "show": vq.show_requested = True
+                elif a == "hide": vq.hide_requested = True
                 elif a == "replay":
                     if not vq.replay(iid):
                         return self._json(404, {"error": "no such item"})
@@ -415,6 +428,8 @@ class Widget:
         self.tk, self.vq = tk, vq
         self.root = tk.Tk()
         self.W = int(360 * max(1.0, self.root.winfo_fpixels("1i") / 96))
+        self.root.report_callback_exception = lambda *exc: log(
+            "player error: " + "".join(__import__("traceback").format_exception(*exc))[-1500:])
         self.root.title("Voice queue")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
@@ -522,6 +537,12 @@ class Widget:
         self.hidden_until = time.time() + secs
         self.root.withdraw()
 
+    def show(self):
+        self.hidden_until, self.hidden_for_next = 0.0, None
+        self.root.deiconify()
+        self.root.lift()
+        self.root.attributes("-topmost", True)
+
     def hide_until_next(self):
         """Out of the way now; back as soon as a different voiceover starts (the current one keeps playing)."""
         cur = self.vq.state()["current"]
@@ -610,18 +631,34 @@ class Widget:
             self.vq.remove(self._queue_ids[sel[0]])
 
     def _tick(self):
+        try:
+            self._tick_once()
+        except Exception as e:  # one bad frame must not stop the player from ever updating again
+            log(f"tick error: {e!r}")
+        if not self.vq._stop:
+            self.root.after(250, self._tick)
+
+    def _tick_once(self):
         if self.vq._stop:
             self.root.destroy()
             return
         st = self.vq.state()
         cur, q = st["current"], st["queue"]
+        if self.vq.show_requested:
+            self.vq.show_requested = False
+            self.show()
+        if self.vq.hide_requested:
+            self.vq.hide_requested = False
+            self.hide_until_next()
+            cur = self.vq.state()["current"]
         if self.hidden_until and time.time() >= self.hidden_until:
-            self.hidden_until = 0
-            self.root.deiconify()
+            self.show()
         if self.hidden_for_next is not None and cur and cur.get("id") != self.hidden_for_next:
-            self.hidden_for_next = None
-            self.root.deiconify()
-            self.root.attributes("-topmost", True)
+            log(f"showing again for {cur.get('id')}")
+            self.show()
+        self.vq.window["hidden"] = ("until next voiceover" if self.hidden_for_next is not None else
+                                    time.strftime("until %H:%M", time.localtime(self.hidden_until))
+                                    if self.hidden_until else None)
         if cur:
             self.title.configure(text=f"{cur.get('project')}" + ("  (replay)" if cur.get("replay_of") else ""))
             self.now.configure(text=cur.get("text", "")[:240], fg=FG)
@@ -651,7 +688,6 @@ class Widget:
         h = self.root.winfo_reqheight()
         if h != self.root.winfo_height():
             self.root.geometry(f"{self.W}x{h}+{x}+{y}")
-        self.root.after(250, self._tick)
 
     def run(self):
         self.root.mainloop()
