@@ -418,3 +418,20 @@ GPU acceleration: all platforms use standard `onnxruntime` with `CPUExecutionPro
 MIT — see [LICENSE](LICENSE).
 
 Model weights are distributed by [hexgrad](https://huggingface.co/hexgrad/Kokoro-82M) under Apache 2.0.
+
+## Voice queue (voiced.py)
+
+The Stop hook no longer plays audio itself. It posts each blurb to one local daemon, `voiced.py`
+(127.0.0.1:4712, started by the hook on demand), which:
+
+- speaks one reply at a time, oldest first, so parallel sessions never talk over each other
+- starts each one with where it came from ("From agentic os v2.", "From a pytest run.")
+- records replies from headless runs (`claude -p`, SDK) in history without speaking them
+  (`voiced.py --speak-headless` or `VOICED_SPEAK_HEADLESS=1` to speak them too)
+- shows a small always-on-top player: now playing, Pause / Skip / Mute, and (expand with the arrow)
+  the queue and the last 7 days of voiceovers. Double-click a history row to replay it; right-click
+  it to copy `claude --resume <session>` for the session that said it. Drag to move; right-click the
+  header to hide it for an hour or quit.
+- keeps history as text in `%LOCALAPPDATA%\local-tts\history.jsonl` (7 days; replays are synthesized again)
+
+Tests: `venv\Scripts\python.exe -m unittest test_voiced`

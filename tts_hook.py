@@ -1,5 +1,6 @@
 """
-Claude Code Stop hook — speaks a short blurb of each response via Kokoro TTS.
+Claude Code Stop hook — hands a short blurb of each response to the voice queue (voiced.py),
+which speaks one at a time, says which project it came from, and keeps a 7-day history.
 
 Do Not Disturb (Ember Launchpad): ~/.claude/voice_dnd pauses speech, optionally until a time.
 
@@ -170,33 +171,66 @@ def dnd_active() -> bool:
     return True
 
 
+# ── voice queue daemon (voiced.py) ─────────────────────────────
+VOICED_URL = "http://127.0.0.1:" + os.environ.get("VOICED_PORT", "4712")
+VOICED     = os.path.join(_HERE, "voiced.py")
+
+
+def _log(msg: str) -> None:
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as log:
+            log.write(f"[tts_hook] {msg}\n")
+    except OSError:
+        pass
+
+
+def _post(path: str, payload: dict, timeout: float = 1.5) -> bool:
+    import urllib.request
+    req = urllib.request.Request(VOICED_URL + path, data=json.dumps(payload).encode("utf-8"),
+                                 headers={"content-type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status == 200
+    except OSError:
+        return False
+
+
+def _start_daemon() -> None:
+    flags = 0
+    if sys.platform == "win32":
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    subprocess.Popen([PYTHON, VOICED], cwd=_HERE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+
+
+def send(payload: dict, autostart: bool = True) -> bool:
+    """Hand the blurb to the one voice queue; start it if it is not running. Never speaks on its own."""
+    import time
+    if _post("/say", payload):
+        return True
+    if not autostart:
+        return False
+    _start_daemon()
+    deadline = time.time() + 7  # the hook timeout is 10 s
+    while time.time() < deadline:
+        time.sleep(0.4)
+        if _post("/say", payload):
+            return True
+    return False
+
+
 def main():
-    # Diagnostic: always log that we were called
-    with open(LOG_FILE, "a") as log:
-        log.write(f"[tts_hook] called\n")
-
+    _log("called")
     if not os.path.exists(TOGGLE_FILE):
-        with open(LOG_FILE, "a") as log:
-            log.write(f"[tts_hook] disabled (no toggle file)\n")
-        return
-
-    if dnd_active():
-        with open(LOG_FILE, "a") as log:
-            log.write("[tts_hook] do not disturb\n")
+        _log("disabled (no toggle file)")
         return
 
     try:
-        # Read stdin as raw bytes and decode as UTF-8 explicitly.
-        # Default text-mode stdin uses the Windows locale (cp1252), which
-        # mangles em-dashes and other non-ASCII into mojibake (e.g. "â€"").
-        raw = sys.stdin.buffer.read().decode("utf-8")
-        data = json.loads(raw)
-        with open(LOG_FILE, "a") as log:
-            log.write(f"[tts_hook] parsed JSON, stop_hook_active={data.get('stop_hook_active')}\n")
-            log.write(f"[tts_hook] message preview: {data.get('last_assistant_message','')[:80]}\n")
+        # Read stdin as raw bytes and decode as UTF-8 explicitly: the Windows locale (cp1252) mangles
+        # em-dashes and other non-ASCII into mojibake.
+        data = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
     except Exception as e:
-        with open(LOG_FILE, "a") as log:
-            log.write(f"[tts_hook] JSON parse error: {e}\n")
+        _log(f"JSON parse error: {e}")
         return
 
     if data.get("stop_hook_active"):
@@ -206,30 +240,23 @@ def main():
     if not message or not message.strip():
         return
 
-    blurb = extract_blurb(message)
-    blurb = normalize_for_tts(blurb)
+    blurb = normalize_for_tts(extract_blurb(message))
     if len(blurb) < MIN_CHARS:
         return
 
-    try:
-        with open(TMPFILE, "w", encoding="utf-8") as f:
-            f.write(blurb)
-    except Exception as e:
-        with open(LOG_FILE, "a") as log:
-            log.write(f"[tts_hook] write error: {e}\n")
-        return
-
-    try:
-        subprocess.Popen(
-            [PYTHON, TTS_SCRIPT, "--file", TMPFILE, "--autoplay"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except Exception as e:
-        with open(LOG_FILE, "a") as log:
-            log.write(f"[tts_hook] launch error: {e}\n")
+    payload = {
+        "text": blurb,
+        "cwd": data.get("cwd") or os.getcwd(),
+        "session_id": data.get("session_id") or "",
+        # "cli" for an interactive session; "sdk-*" for claude -p and SDK runs (spoken only with --speak-headless)
+        "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT", ""),
+    }
+    dnd = dnd_active()
+    if dnd:
+        payload["silent"] = "do not disturb"
+    _log(f"{payload['entrypoint'] or '?'} {payload['cwd']} {payload['session_id'][:8]}: {blurb[:80]}")
+    if not send(payload, autostart=not dnd):
+        _log("voice queue unreachable" if not dnd else "do not disturb (queue not running, not logged)")
 
 
 if __name__ == "__main__":
