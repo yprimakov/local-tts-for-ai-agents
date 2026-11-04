@@ -425,6 +425,7 @@ class Widget:
         self.root.configure(bg=LINE)
         self.expanded = False
         self.hidden_until = 0.0
+        self.hidden_for_next = None  # id playing when hidden ("" if none); a different item brings it back
         self._hist_ids: list[str] = []
         self._queue_ids: list[str] = []
         self._build()
@@ -453,6 +454,9 @@ class Widget:
         self.count.pack(side="left", padx=4)
         self.b_more = self._btn(top, "▾", self.toggle_expand, w=2)
         self.b_more.pack(side="left")
+        self.b_close = self._btn(top, "\u2715", self.hide_until_next, w=2)
+        self.b_close.pack(side="left", padx=(2, 0))
+        self.root.bind("<Escape>", lambda e: self.hide_until_next())
         for w in (outer, top, self.title, self.dot, self.count):
             w.bind("<ButtonPress-1>", self._drag_start)
             w.bind("<B1-Motion>", self._drag)
@@ -506,14 +510,23 @@ class Widget:
 
     def _menu(self, e):
         m = self.tk.Menu(self.root, tearoff=0)
-        m.add_command(label="Hide for 1 hour", command=lambda: self._hide(3600))
+        m.add_command(label="Hide until next voiceover  (\u2715 / Esc)", command=self.hide_until_next)
+        m.add_command(label="Hide for 1 hour, even while speaking", command=lambda: self._hide(3600))
         m.add_command(label="Clear queue", command=self.vq.clear)
         m.add_separator()
         m.add_command(label="Quit voice queue", command=self.quit)
         m.tk_popup(e.x_root, e.y_root)
 
     def _hide(self, secs):
+        self.hidden_for_next = None
         self.hidden_until = time.time() + secs
+        self.root.withdraw()
+
+    def hide_until_next(self):
+        """Out of the way now; back as soon as a different voiceover starts (the current one keeps playing)."""
+        cur = self.vq.state()["current"]
+        self.hidden_until = 0.0
+        self.hidden_for_next = (cur or {}).get("id", "")
         self.root.withdraw()
 
     def quit(self):
@@ -605,6 +618,10 @@ class Widget:
         if self.hidden_until and time.time() >= self.hidden_until:
             self.hidden_until = 0
             self.root.deiconify()
+        if self.hidden_for_next is not None and cur and cur.get("id") != self.hidden_for_next:
+            self.hidden_for_next = None
+            self.root.deiconify()
+            self.root.attributes("-topmost", True)
         if cur:
             self.title.configure(text=f"{cur.get('project')}" + ("  (replay)" if cur.get("replay_of") else ""))
             self.now.configure(text=cur.get("text", "")[:240], fg=FG)
