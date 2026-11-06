@@ -131,12 +131,12 @@ Yury hears it through a speaker while doing something else. It must save him tim
 Write JSON only, no prose around it, with exactly these keys:
 {{"speak": true or false,
   "summary": "1 to 3 short spoken sentences",
-  "decision": null or {{"question": "...", "options": ["...", "..."], "recommended": index or null}}}}
+  "decisions": [] or [{{"question": "...", "options": ["...", "..."], "recommended": index or null}}]}}
 
 summary: plain conversational English, like a colleague giving a quick update. Say what was done
 and what, if anything, Yury needs to do. No code, JSON, markup, file paths, URLs, IDs, hashes,
 command names or bullet lists. Say numbers and names naturally. Do not start with "The agent".
-decision: only when the reply asks Yury to choose or answer something. Options are short (at most
+decisions: one entry per thing the reply asks Yury to choose or answer, in order. Options are short (at most
 6 words each, 2 to 4 of them). recommended is the index of the option the agent recommends, or null.
 speak: false when the reply is machine output (raw JSON, logs, data dumps) or routine noise with
 nothing worth hearing; then summary is one short sentence saying what kind of output it was.
@@ -170,14 +170,54 @@ def parse_summary(raw: str) -> dict | None:
     if not summary:
         return None
     out = {"speak": bool(d.get("speak", True)), "summary": plain_speech(summary) or summary[:400], "decision": None}
-    dec = d.get("decision")
-    if isinstance(dec, dict) and dec.get("question") and isinstance(dec.get("options"), list):
-        opts = [str(o).strip()[:80] for o in dec["options"] if str(o).strip()][:4]
-        rec = dec.get("recommended")
-        if len(opts) >= 2:
-            out["decision"] = {"question": str(dec["question"]).strip()[:240], "options": opts,
-                               "recommended": rec if isinstance(rec, int) and 0 <= rec < len(opts) else None}
+    decs = d.get("decisions") if isinstance(d.get("decisions"), list) else [d.get("decision")]
+    out["decisions"] = []
+    for dec in decs:
+        if isinstance(dec, dict) and dec.get("question") and isinstance(dec.get("options"), list):
+            opts = [str(o).strip()[:80] for o in dec["options"] if str(o).strip()][:4]
+            rec = dec.get("recommended")
+            if len(opts) >= 2:
+                out["decisions"].append({"question": str(dec["question"]).strip()[:240], "options": opts,
+                                         "recommended": rec if isinstance(rec, int) and 0 <= rec < len(opts) else None})
+    out["decision"] = out["decisions"][0] if out["decisions"] else None
     return out
+
+
+# ---------------------------------------------------------------- calls: decisions waiting on Yury
+BACKGROUND = ("not spoken: headless run", "not spoken: grouped", "not spoken: nothing to say")
+_answers = threading.Lock()
+
+
+def open_calls(rows: list[dict], now: float | None = None) -> list[dict]:
+    """History rows, newest first, whose decision still waits. A later reply from the same session means it was
+    answered there. They stay open as long as history keeps them, so a daily pass can clear them."""
+    now = now or time.time()
+    newest: dict[str, float] = {}
+    for r in rows:
+        sid = r.get("session_id")
+        if sid and r.get("status") not in BACKGROUND:
+            newest[sid] = max(newest.get(sid, 0), r.get("ts", 0))
+    return [r for r in rows if r.get("decision") and not r.get("answer") and not r.get("dismissed")
+            and newest.get(r.get("session_id") or "", 0) <= r.get("ts", 0) + 1
+            and now - r.get("ts", 0) < HISTORY_DAYS * 86400]
+
+
+def answer_call(history: "History", item_id: str, text: str, ix: int | None = None) -> str | None:
+    """Record one answer. Returns what to send the session once every question has one, else None."""
+    with _answers:
+        row = history.get(item_id) or {}
+        ds = [dict(d) for d in (row.get("decisions") or ([row["decision"]] if row.get("decision") else []))]
+        left = [i for i, d in enumerate(ds) if not d.get("answer")]
+        if not left:
+            return None
+        ds[ix if ix in left else left[0]]["answer"] = text
+        left = [i for i, d in enumerate(ds) if not d.get("answer")]
+        if left:
+            history.update(item_id, decisions=ds, decision=ds[left[0]])
+            return None
+        full = text if len(ds) == 1 else "\n".join(f"{i + 1}. {d['question']} {d['answer']}" for i, d in enumerate(ds))
+        history.update(item_id, decisions=ds, answer=full, answered_at=time.time())
+        return full
 
 
 class Summarizer:
@@ -364,6 +404,7 @@ class VoiceQueue:
             with self._cv:
                 if out:
                     item["text"], item["decision"] = out["summary"], out["decision"]
+                    item["decisions"] = out.get("decisions") or ([out["decision"]] if out["decision"] else [])
                     if not out["speak"] and item in self.queue and not item.get("decision"):
                         self.queue.remove(item)
                         item["status"] = "not spoken: nothing to say"
@@ -380,6 +421,7 @@ class VoiceQueue:
                 item["ready"] = True
                 self._cv.notify_all()
             self.history.update(item["id"], text=item["text"], decision=item.get("decision"),
+                                decisions=item.get("decisions") or [],
                                 group_count=item.get("group_count", 1),
                                 **({"status": item["status"]} if item["status"].startswith("not spoken") else {}))
 
@@ -785,6 +827,10 @@ def main(argv=None) -> int:
             time.sleep(3600)
     threading.Thread(target=prune, daemon=True).start()
 
+    from ember_sync import EmberSync
+    ember = EmberSync(vq, resume_session, log)
+    threading.Thread(target=ember.run, daemon=True).start()
+
     if args.no_window:
         try:
             while not vq._stop:
@@ -794,7 +840,8 @@ def main(argv=None) -> int:
     else:
         from types import SimpleNamespace
         from player import Widget
-        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session)).run()
+        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session,
+                                   answer_call=answer_call, open_calls=open_calls, ember=ember)).run()
     vq.stop()
     server.shutdown()
     return 0

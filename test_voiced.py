@@ -210,6 +210,86 @@ class DesktopLinkTests(unittest.TestCase):
         self.assertEqual(voiced.desktop_session_id("99999999-0f5c-47a9-8666-481231cd02e6", root), "")
 
 
+class EmberSyncTests(unittest.TestCase):
+    """The player and Ember stay one queue. A fake bridge stands in for the Warden."""
+
+    def setUp(self):
+        import ember_sync
+        self.h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
+        self.cards, self.resumed = {}, []
+        self.vq = voiced.VoiceQueue(self.h, fake_synth, FakePlayer)
+        self.sync = ember_sync.EmberSync(self.vq, lambda vq, row, text: self.resumed.append(text), log=lambda m: None,
+                                         url="http://x", call=self.bridge)
+        self.h.add({"id": "a", "ts": time.time(), "session_id": "s", "project": "p",
+                    "decision": {"question": "Q1", "options": ["Yes", "No"], "recommended": 0},
+                    "decisions": [{"question": "Q1", "options": ["Yes", "No"], "recommended": 0},
+                                  {"question": "Q2", "options": ["Up", "Down"], "recommended": None}]})
+
+    def bridge(self, method, url, body=None):
+        path = url[len("http://x"):]
+        if method == "GET" and path == "/needs/external":
+            return {"cards": list(self.cards.values())}
+        if method == "GET":
+            return {"approvals": [{"id": 9, "ts": 1, "kind": "decision", "summary": "Ember asks",
+                                   "detail": {"options": [{"id": "x", "label": "X"}, {"id": "y", "label": "Y"}]}}]}
+        if path == "/needs/external":
+            opts = [{"id": str(i + 1), "label": o} for i, o in enumerate(body["options"])]
+            self.cards[body["source_id"]] = {"id": len(self.cards) + 1, "state": "pending", "choice": None,
+                                             "detail": {"source_id": body["source_id"], "options": opts}}
+            return {}
+        card = next(c for c in self.cards.values() if path == f"/needs/{c['id']}/decide")
+        card["state"], card["choice"] = ("approved", body["choice"]) if body["decision"] == "approve" else ("denied", None)
+        return {}
+
+    def test_each_question_becomes_one_card_and_ember_cards_show_here(self):
+        self.sync.sweep()
+        self.sync.sweep()
+        self.assertEqual(sorted(self.cards), ["a#0", "a#1"])
+        self.assertEqual(self.sync.remote_calls[0]["decision"]["options"], ["X", "Y"])
+
+    def test_answers_in_ember_resume_once_all_are_in(self):
+        self.sync.sweep()
+        self.cards["a#0"].update(state="approved", choice="2")
+        self.sync.sweep()
+        self.assertEqual(self.resumed, [])
+        self.assertEqual(self.h.get("a")["decision"]["question"], "Q2")
+        self.cards["a#1"].update(state="approved", choice="1")
+        self.sync.sweep()
+        self.assertEqual(self.resumed, ["1. Q1 No\n2. Q2 Up"])
+        self.sync.sweep()
+        self.assertEqual(len(self.resumed), 1)
+
+    def test_answer_here_closes_the_card(self):
+        self.sync.sweep()
+        self.assertIsNone(voiced.answer_call(self.h, "a", "Yes"))
+        self.assertEqual(voiced.answer_call(self.h, "a", "Sideways"), "1. Q1 Yes\n2. Q2 Sideways")
+        self.sync.sweep()
+        self.assertEqual((self.cards["a#0"]["state"], self.cards["a#0"]["choice"]), ("approved", "1"))
+        self.assertEqual(self.cards["a#1"]["state"], "denied")  # typed text: kept as the note
+        self.assertEqual(self.resumed, [])
+
+    def test_later_reply_closes_the_card(self):
+        self.sync.sweep()
+        self.h.add({"id": "b", "ts": time.time() + 5, "session_id": "s"})
+        self.sync.sweep()
+        self.assertEqual(self.cards["a#0"]["state"], "denied")
+
+    def test_old_calls_stay_open_for_a_daily_pass(self):
+        rows = [{"id": "o", "ts": time.time() - 3 * 86400, "decision": {"question": "q", "options": ["a", "b"]}}]
+        self.assertEqual(len(voiced.open_calls(rows)), 1)
+
+    def test_offline_is_quiet_and_recovers(self):
+        def down(*a, **k):
+            raise OSError("no route")
+        self.sync.call = down
+        self.sync.safe_sweep()
+        self.assertFalse(self.sync.up)
+        self.sync.call = self.bridge
+        self.sync.safe_sweep()
+        self.assertTrue(self.sync.up)
+        self.assertIn("a#0", self.cards)
+
+
 class SpeechTests(unittest.TestCase):
     def test_machine_output_detected(self):
         self.assertTrue(voiced.looks_machine('{"messages":[{"sender":"Boris","to":"Matt"}]}'))

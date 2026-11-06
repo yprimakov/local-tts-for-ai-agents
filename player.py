@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -939,20 +940,17 @@ class Widget:
         now = time.time()
         calls, seen = [], set()
         rows = self.vq.history.recent(150)
-        newest: dict[str, float] = {}  # a later reply from the same session means it was answered there
-        for r in rows:
-            sid = r.get("session_id")
-            if sid and r.get("status") not in BACKGROUND:
-                newest[sid] = max(newest.get(sid, 0), r.get("ts", 0))
         if cur and cur.get("decision") and (cur.get("replay_of") or cur["id"]) not in self.answered:
-            calls.append(cur)
-            seen.add(cur.get("replay_of") or cur["id"])
-        for r in rows:
-            stale = newest.get(r.get("session_id") or "", 0) > r.get("ts", 0) + 1
-            if (r.get("decision") and not r.get("answer") and not r.get("dismissed") and not stale
-                    and r["id"] not in self.answered and r["id"] not in seen and now - r.get("ts", 0) < 86400):
+            cid = cur.get("replay_of") or cur["id"]
+            row = self.vq.history.get(cid) or {}
+            if not row.get("answer") and not row.get("dismissed"):
+                calls.append({**cur, "decision": row.get("decision") or cur["decision"]})
+                seen.add(cid)
+        for r in self.api.open_calls(rows, now):
+            if r["id"] not in self.answered and r["id"] not in seen:
                 calls.append(r)
                 seen.add(r["id"])
+        calls += [r for r in self.api.ember.remote_calls if r["id"] not in self.answered]  # Ember's own cards
         return calls
 
     def _call(self):
@@ -976,7 +974,8 @@ class Widget:
             return
         cid = self._call_id(item)
         self.answered.add(cid)
-        self.vq.history.update(cid, dismissed=True)
+        if not item.get("remote"):
+            self.vq.history.update(cid, dismissed=True)
         self._after_call()
 
     def _after_call(self):
@@ -1018,8 +1017,20 @@ class Widget:
 
     def _answer(self, item, text):
         cid = self._call_id(item)
+        if item.get("remote"):
+            if text not in item["decision"]["options"]:
+                self._toast("Pick one of the options for an Ember card")
+                return
+            self.answered.add(cid)
+            threading.Thread(target=self.api.ember.answer_remote, args=(item, text), daemon=True).start()
+            self._toast("Sent to Ember")
+            self._after_call()
+            return
+        text = self.api.answer_call(self.vq.history, cid, text)
+        if text is None:  # more questions from the same reply
+            self._after_call()
+            return
         self.answered.add(cid)
-        self.vq.history.update(cid, answer=text, answered_at=time.time())
         if self.api.resume_session(self.vq, item, text):
             self._toast(f"Sent to {item.get('project')}. Its reply will play here")
         else:

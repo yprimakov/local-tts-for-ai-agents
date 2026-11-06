@@ -7,3 +7,4 @@ __pycache__/
 kokoro_hook.bat
 kokoro_hook.sh
 
+ember_url.txt
