@@ -299,6 +299,7 @@ class VoiceQueue:
         self.window = {"hidden": None}  # set by the player: None, "until next voiceover", "until HH:MM"
         self.show_requested = False
         self.hide_requested = False
+        self.quiet: dict[str, float] = {}  # project -> muted until (right-click "Mute <project> for 1 hour")
 
     # -- intake
     def say(self, text: str, cwd: str = "", session_id: str = "", entrypoint: str = "",
@@ -317,6 +318,8 @@ class VoiceQueue:
             silent = "headless run"
         if not silent and self.muted:
             silent = "muted"
+        if not silent and self.quiet.get(src.get("project", ""), 0) > time.time():
+            silent = "project muted"
         if silent:
             item["status"] = f"not spoken: {silent}"
             self.history.add(item)
@@ -364,6 +367,13 @@ class VoiceQueue:
                     if not out["speak"] and item in self.queue and not item.get("decision"):
                         self.queue.remove(item)
                         item["status"] = "not spoken: nothing to say"
+                    elif item.get("decision") and item in self.queue:
+                        # a reply that needs Yury plays before plain status updates (replays stay first)
+                        self.queue.remove(item)
+                        at = 0
+                        while at < len(self.queue) and (self.queue[at].get("replay_of") or self.queue[at].get("decision")):
+                            at += 1
+                        self.queue.insert(at, item)
                 else:
                     item["text"] = plain_speech(item.get("message", "")) or (
                         "Finished with technical output. The details are in the session.")
@@ -418,6 +428,17 @@ class VoiceQueue:
                         self.history.update(it["id"], status="not spoken: muted")
                 self.queue.clear()
         if muted:
+            self.skip()
+
+    def quiet_project(self, project: str, secs: float) -> None:
+        """One noisy project goes to history only for a while; whatever it has queued is dropped."""
+        with self._cv:
+            self.quiet[project] = time.time() + secs
+            for it in [i for i in self.queue if i.get("project") == project and not i.get("replay_of")]:
+                self.queue.remove(it)
+                self.history.update(it["id"], status="not spoken: project muted")
+            playing = self.current and self.current.get("project") == project
+        if playing:
             self.skip()
 
     def clear(self) -> None:
@@ -595,9 +616,23 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 return self._json(200, vq.state())
             self._json(404, {"error": "not found"})
 
-    srv = ThreadingHTTPServer((HOST, port), H)
+    srv = _ExclusiveServer((HOST, port), H)
     srv.vq = vq
     return srv
+
+
+class _ExclusiveServer(ThreadingHTTPServer):
+    """One daemon per machine. Python's servers set SO_REUSEADDR, which on Windows lets a second process bind
+    the same port, so two daemons (the hook's auto-start racing a manual start) both ran, each with its own
+    player window stacked on the other. Exclusive binding makes the second one fail and exit."""
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def server_bind(self):
+        import socket
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 # ---------------------------------------------------------------- open the session a reply came from
@@ -683,716 +718,6 @@ def resume_session(vq: "VoiceQueue", item: dict, answer: str) -> bool:
     return True
 
 
-# ---------------------------------------------------------------- the on-screen player
-BG, SURFACE, HOVER, BORDER = "#151518", "#1d1d22", "#27272e", "#30303a"
-FG, MUTED, FAINT = "#eeeef2", "#a3a3ae", "#6e6e7a"
-ACCENT, ACCENT_HI, GREEN, AMBER = "#ff7a1a", "#ff9447", "#4cc38a", "#f0b44c"
-
-# Segoe Fluent Icons / MDL2 glyphs on Windows; plain symbols elsewhere
-_ICONS = {
-    "play": ("", "▶"), "pause": ("", "❙❙"), "next": ("", "⏭"),
-    "volume": ("", "\U0001f50a"), "mute": ("", "\U0001f507"), "down": ("", "▾"),
-    "up": ("", "▴"), "close": ("", "✕"), "replay": ("", "▶"),
-    "remove": ("", "✕"),
-}
-_STATUS_TAGS = {"not spoken: headless run": "headless", "not spoken: muted": "muted",
-                "not spoken: do not disturb": "do not disturb", "skipped": "skipped", "cleared": "cleared",
-                "removed": "removed"}
-
-
-class Tooltip:
-    def __init__(self, w, text_fn, ui):
-        self.w, self.text_fn, self.ui, self.tip, self.job = w, text_fn, ui, None, None
-        w.bind("<Enter>", self._arm, add="+")
-        w.bind("<Leave>", self._hide, add="+")
-        w.bind("<ButtonPress>", self._hide, add="+")
-
-    def _arm(self, _e):
-        self.job = self.w.after(450, self._show)
-
-    def _show(self):
-        tk = self.ui.tk
-        self.tip = t = tk.Toplevel(self.w)
-        t.overrideredirect(True)
-        t.attributes("-topmost", True)
-        tk.Label(t, text=self.text_fn(), bg="#000000", fg=FG, font=self.ui.f_small, padx=6, pady=3).pack()
-        t.geometry(f"+{self.w.winfo_rootx()}+{self.w.winfo_rooty() + self.w.winfo_height() + 4}")
-
-    def _hide(self, _e=None):
-        if self.job:
-            self.w.after_cancel(self.job)
-            self.job = None
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
-
-
-class Widget:
-    """Always-on-top card. Idle: a slim bar. Playing: what, from where, how far. Expanded: up next + 7 days."""
-
-    def __init__(self, vq: VoiceQueue):
-        import tkinter as tk
-        import tkinter.font as tkfont
-        if sys.platform == "win32":  # crisp text on high-DPI screens; sizes below scale with it
-            try:
-                import ctypes
-                ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            except Exception:
-                pass
-        self.tk, self.vq = tk, vq
-        self.root = tk.Tk()
-        self.root.report_callback_exception = lambda *exc: log(
-            "player error: " + "".join(__import__("traceback").format_exception(*exc))[-1500:])
-        self.root.title("Voice queue")
-        self.S = max(1.0, self.root.winfo_fpixels("1i") / 96)
-        self.W = self.px(372)
-        fams = set(tkfont.families(self.root))
-        ui = next((f for f in ("Segoe UI Variable Text", "Segoe UI", "Inter", "DejaVu Sans") if f in fams), "TkDefaultFont")
-        semi = next((f for f in ("Segoe UI Variable Display Semib", "Segoe UI Semibold") if f in fams), None)
-        icon = next((f for f in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if f in fams), None)
-        self.f_body = (ui, 10)
-        self.f_small = (ui, 8)
-        self.f_tag = (ui, 7, "bold")
-        self.f_title = (semi, 11) if semi else (ui, 11, "bold")
-        self.f_row = (semi, 9) if semi else (ui, 9, "bold")
-        self.f_icon = (icon, 11) if icon else (ui, 11)
-        self.f_icon_big = (icon, 13) if icon else (ui, 13)
-        self._glyph = 0 if icon else 1
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.configure(bg=BORDER)
-        self.expanded = False
-        self.hidden_until = 0.0
-        self.hidden_for_next = None  # id playing when hidden ("" if none); a different item brings it back
-        self._queue_sig = None
-        self._hist_sig = None
-        self._open_row = None
-        self._mode = None
-        self._build()
-        self._place()
-        self.root.after(50, self._round_corners)
-        self._tick()
-
-    # ---------------------------------------------------------- helpers
-    def px(self, n: float) -> int:
-        return int(round(n * self.S))
-
-    def glyph(self, name: str) -> str:
-        return _ICONS[name][self._glyph]
-
-    def _icon_btn(self, parent, name, cmd, tip, big=False, primary=False):
-        tk = self.tk
-        bg = ACCENT if primary else BG
-        hi = ACCENT_HI if primary else HOVER
-        b = tk.Label(parent, text=self.glyph(name), bg=bg, fg="#111111" if primary else MUTED,
-                     font=self.f_icon_big if big else self.f_icon, cursor="hand2",
-                     padx=self.px(12 if big else 6), pady=self.px(6 if big else 3))
-        b.bind("<Button-1>", lambda e: cmd())
-        b.bind("<Enter>", lambda e: b.configure(bg=hi, fg="#111111" if primary else FG))
-        b.bind("<Leave>", lambda e: b.configure(bg=bg, fg="#111111" if primary else MUTED))
-        b.icon_name = name
-        Tooltip(b, tip if callable(tip) else (lambda: tip), self)
-        return b
-
-    def _set_icon(self, b, name):
-        if b.icon_name != name:
-            b.icon_name = name
-            b.configure(text=self.glyph(name))
-
-    def _round_corners(self):
-        if sys.platform != "win32":
-            return
-        try:  # Windows 11 rounded corners for a borderless window
-            import ctypes
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
-            pref = ctypes.c_int(2)  # DWMWCP_ROUND
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
-        except Exception:
-            pass
-
-    @staticmethod
-    def _when(ts: float) -> str:
-        return time.strftime("%I:%M %p", time.localtime(ts)).lstrip("0")
-
-    @staticmethod
-    def _day(ts: float) -> str:
-        d = time.localtime(ts)
-        today = time.localtime()
-        days = (time.mktime(today[:3] + (0, 0, 0, 0, 0, -1)) - time.mktime(d[:3] + (0, 0, 0, 0, 0, -1))) / 86400
-        if days < 0.5:
-            return "Today"
-        if days < 1.5:
-            return "Yesterday"
-        return time.strftime("%A, %b %d", d).replace(" 0", " ")
-
-    @staticmethod
-    def _clock(sec: float) -> str:
-        sec = max(0, int(sec))
-        return f"{sec // 60}:{sec % 60:02d}"
-
-    # ---------------------------------------------------------- layout
-    def _build(self):
-        tk = self.tk
-        p = self.px
-        self.card = card = tk.Frame(self.root, bg=BG, padx=p(14), pady=p(10))
-        card.pack(fill="both", expand=True, padx=1, pady=1)
-
-        # header: status on the left, window actions on the right
-        top = tk.Frame(card, bg=BG)
-        top.pack(fill="x")
-        self.dot = tk.Canvas(top, width=p(8), height=p(8), bg=BG, highlightthickness=0)
-        self.dot_id = self.dot.create_oval(0, 0, p(8), p(8), fill=FAINT, width=0)
-        self.dot.pack(side="left", pady=p(1))
-        self.status = tk.Label(top, text="Idle", bg=BG, fg=MUTED, font=self.f_small, anchor="w")
-        self.status.pack(side="left", padx=(p(6), 0))
-        self.badge = tk.Label(top, text="", bg=SURFACE, fg=MUTED, font=self.f_small, padx=p(6))
-        self.b_close = self._icon_btn(top, "close", self.hide_until_next, "Hide until the next voiceover (Esc)")
-        self.b_close.pack(side="right")
-        self.b_more = self._icon_btn(top, "down", self.toggle_expand,
-                                     lambda: "Hide queue and history" if self.expanded else "Show queue and history")
-        self.b_more.pack(side="right")
-        self.b_mute = self._icon_btn(top, "volume", self.toggle_mute,
-                                     lambda: "Unmute" if self.vq.muted else "Mute: new replies go to history only")
-        self.b_mute.pack(side="right")
-        for w in (card, top, self.status, self.dot):
-            w.bind("<ButtonPress-1>", self._drag_start)
-            w.bind("<B1-Motion>", self._drag)
-            w.bind("<Button-3>", self._menu)
-
-        # idle line: the last voiceover, one click to hear it again
-        self.idle = tk.Frame(card, bg=BG)
-        self.idle_text = tk.Label(self.idle, text="", bg=BG, fg=FAINT, font=self.f_small, anchor="w")
-        self.idle_text.pack(side="left", fill="x", expand=True)
-        self.idle_replay = self._icon_btn(self.idle, "replay", self._replay_last, "Replay the last voiceover")
-        self.idle_replay.pack(side="right")
-
-        # now playing
-        self.now = tk.Frame(card, bg=BG)
-        self.project = tk.Label(self.now, text="", bg=BG, fg=ACCENT, font=self.f_title, anchor="w", cursor="hand2")
-        self.project.pack(fill="x", pady=(p(6), 0))
-        self.project.bind("<Button-1>", lambda e: self._open(self._shown))
-        self._shown = None
-        Tooltip(self.project, lambda: "Open this session", self)
-        self.meta = tk.Label(self.now, text="", bg=BG, fg=FAINT, font=self.f_small, anchor="w")
-        self.meta.pack(fill="x")
-        self.body = tk.Label(self.now, text="", bg=BG, fg=FG, font=self.f_body, anchor="w", justify="left",
-                             wraplength=self.W - p(30))
-        self.body.pack(fill="x", pady=(p(6), p(8)))
-        prog = tk.Frame(self.now, bg=BG)
-        prog.pack(fill="x")
-        self.t_pos = tk.Label(prog, text="0:00", bg=BG, fg=FAINT, font=self.f_small)
-        self.t_pos.pack(side="left")
-        self.t_dur = tk.Label(prog, text="0:00", bg=BG, fg=FAINT, font=self.f_small)
-        self.t_dur.pack(side="right")
-        self.bar = tk.Canvas(prog, height=p(14), bg=BG, highlightthickness=0, cursor="hand2")
-        self.bar.pack(side="left", fill="x", expand=True, padx=p(8))
-        self.bar_track = self.bar.create_rectangle(0, p(5), 0, p(9), fill=HOVER, width=0)
-        self.bar_fill = self.bar.create_rectangle(0, p(5), 0, p(9), fill=ACCENT, width=0)
-        self.bar_knob = self.bar.create_oval(0, 0, 0, 0, fill=FG, width=0, state="hidden")
-        self._scrub = None  # fraction while dragging
-        self.bar.bind("<Enter>", lambda e: self.bar.itemconfigure(self.bar_knob, state="normal"))
-        self.bar.bind("<Leave>", lambda e: self._scrub is None and self.bar.itemconfigure(self.bar_knob, state="hidden"))
-        self.bar.bind("<ButtonPress-1>", self._scrub_move)
-        self.bar.bind("<B1-Motion>", self._scrub_move)
-        self.bar.bind("<ButtonRelease-1>", self._scrub_end)
-        Tooltip(self.bar, lambda: "Click or drag to jump", self)
-        ctl = tk.Frame(self.now, bg=BG)
-        ctl.pack(fill="x", pady=(p(8), 0))
-        self.b_pause = self._icon_btn(ctl, "pause", self.toggle_pause,
-                                      lambda: "Resume (Space)" if self.vq.paused else "Pause (Space)",
-                                      big=True, primary=True)
-        self.b_pause.pack(side="left")
-        self.b_skip = self._icon_btn(ctl, "next", self.vq.skip, "Skip to the next one (Right arrow)", big=True)
-        self.b_skip.pack(side="left", padx=(p(6), 0))
-        self.next_hint = tk.Label(ctl, text="", bg=BG, fg=FAINT, font=self.f_small, anchor="e")
-        self.next_hint.pack(side="right")
-
-        # a decision the agent is waiting on: stays until answered or dismissed
-        self.ask = tk.Frame(card, bg=SURFACE, padx=p(12), pady=p(10))
-        self._ask_item = None
-        self._ask_sig = None
-        self.answered: set[str] = set()
-
-        # expanded: up next + history
-        self.more = tk.Frame(card, bg=BG)
-        tk.Frame(self.more, bg=BORDER, height=1).pack(fill="x", pady=(p(10), p(6)))
-        self.q_head = tk.Label(self.more, text="UP NEXT", bg=BG, fg=FAINT, font=self.f_tag, anchor="w")
-        self.q_box = tk.Frame(self.more, bg=BG)
-        self.h_head = tk.Label(self.more, text="LAST 7 DAYS", bg=BG, fg=FAINT, font=self.f_tag, anchor="w")
-        self.h_head.pack(fill="x", pady=(p(4), p(2)))
-        wrap = tk.Frame(self.more, bg=BG)
-        wrap.pack(fill="both", expand=True)
-        self.h_canvas = tk.Canvas(wrap, bg=BG, highlightthickness=0, height=p(300), width=self.W - p(30))
-        self.h_canvas.pack(side="left", fill="both", expand=True)
-        self.h_box = tk.Frame(self.h_canvas, bg=BG)
-        self.h_win = self.h_canvas.create_window(0, 0, window=self.h_box, anchor="nw")
-        self.h_box.bind("<Configure>", lambda e: self.h_canvas.configure(scrollregion=self.h_canvas.bbox("all")))
-        self.h_canvas.bind("<Configure>", lambda e: self.h_canvas.itemconfigure(self.h_win, width=e.width))
-        self.root.bind_all("<MouseWheel>", self._wheel)
-        self.root.bind_all("<Button-4>", lambda e: self.h_canvas.yview_scroll(-2, "units"))
-        self.root.bind_all("<Button-5>", lambda e: self.h_canvas.yview_scroll(2, "units"))
-
-        self.root.bind("<Escape>", lambda e: self.hide_until_next())
-        self.root.bind("<space>", lambda e: self.toggle_pause())
-        self.root.bind("<Right>", lambda e: self.vq.skip())
-        self.root.bind("<m>", lambda e: self.toggle_mute())
-
-    def _wheel(self, e):
-        if self.expanded:
-            self.h_canvas.yview_scroll(int(-e.delta / 40) or (-1 if e.delta > 0 else 1), "units")
-
-    def _place(self):
-        self.root.update_idletasks()
-        x = self.root.winfo_screenwidth() - self.W - self.px(24)
-        self.root.geometry(f"{self.W}x{self.root.winfo_reqheight()}+{x}+{self.px(24)}")
-
-    def _fit(self):
-        self.root.update_idletasks()
-        h = self.root.winfo_reqheight()
-        if h != self.root.winfo_height():
-            self.root.geometry(f"{self.W}x{h}+{self.root.winfo_x()}+{self.root.winfo_y()}")
-
-    def _drag_start(self, e):
-        self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
-
-    def _drag(self, e):
-        self.root.geometry(f"+{e.x_root - self._dx}+{e.y_root - self._dy}")
-
-    # ---------------------------------------------------------- scrub, open, answer
-    def _scrub_move(self, e):
-        w = max(1, self.bar.winfo_width())
-        self._scrub = min(1.0, max(0.0, e.x / w))
-        self._draw_bar(self._scrub)
-
-    def _scrub_end(self, e):
-        if self._scrub is not None:
-            self.vq.seek(self._scrub)
-        self._scrub = None
-
-    def _draw_bar(self, frac):
-        p, w = self.px, self.bar.winfo_width()
-        x = int(w * min(max(frac, 0), 1))
-        self.bar.coords(self.bar_track, 0, p(5), w, p(9))
-        self.bar.coords(self.bar_fill, 0, p(5), x, p(9))
-        r = p(5)
-        self.bar.coords(self.bar_knob, max(0, x - r), p(7) - r, max(2 * r, x + r), p(7) + r)
-
-    def _open(self, item):
-        if not item:
-            return
-        msg = open_session(item)
-        if not msg and item.get("session_id"):
-            self._copy(self._resume_cmd(item))
-            msg = "Resume command copied"
-        self._toast(msg or "Can't tell where this session runs")
-
-    def _toast(self, text):
-        self.meta.configure(text=text, fg=GREEN)
-        self.idle_text.configure(text=text, fg=GREEN)
-        self.root.after(2500, lambda: (self.meta.configure(fg=FAINT), self.idle_text.configure(fg=FAINT)))
-
-    def _answer(self, item, text):
-        text = (text or "").strip()
-        if not text:
-            return
-        self.answered.add(item["id"])
-        self.vq.history.update(item.get("replay_of") or item["id"], answer=text, answered_at=time.time())
-        self._ask_item = None
-        if resume_session(self.vq, item, text):
-            self._toast(f"Sent to {item.get('project')}. Its reply will play here")
-        else:
-            self._copy(text)
-            msg = open_session(item)
-            self._toast((msg + ". " if msg else "") + "No session to resume: answer copied")
-
-    def _build_ask(self, item):
-        tk, p = self.tk, self.px
-        for w in self.ask.winfo_children():
-            w.destroy()
-        dec = item["decision"]
-        head = tk.Frame(self.ask, bg=SURFACE)
-        head.pack(fill="x")
-        tk.Label(head, text="NEEDS YOUR ANSWER", bg=SURFACE, fg=ACCENT, font=self.f_tag).pack(side="left")
-        x = tk.Label(head, text="Dismiss", bg=SURFACE, fg=FAINT, font=self.f_small, cursor="hand2")
-        x.pack(side="right")
-        x.bind("<Button-1>", lambda e: (self.answered.add(item["id"]), setattr(self, "_ask_item", None)))
-        who = tk.Label(self.ask, text=item.get("project") or "?", bg=SURFACE, fg=FG, font=self.f_row, anchor="w",
-                       cursor="hand2")
-        who.pack(fill="x", pady=(p(4), 0))
-        who.bind("<Button-1>", lambda e: self._open(item))
-        tk.Label(self.ask, text=dec["question"], bg=SURFACE, fg=FG, font=self.f_body, anchor="w", justify="left",
-                 wraplength=self.W - p(56)).pack(fill="x", pady=(p(2), p(8)))
-        for i, opt in enumerate(dec["options"]):
-            rec = dec.get("recommended") == i
-            b = tk.Frame(self.ask, bg=HOVER if not rec else "#3a2716", cursor="hand2", padx=p(10), pady=p(6))
-            b.pack(fill="x", pady=(0, p(4)))
-            l1 = tk.Label(b, text=opt, bg=b["bg"], fg=FG, font=self.f_small, anchor="w", justify="left",
-                          wraplength=self.W - p(150))
-            l1.pack(side="left")
-            parts = [b, l1]
-            if rec:
-                l2 = tk.Label(b, text="RECOMMENDED", bg=b["bg"], fg=ACCENT, font=self.f_tag)
-                l2.pack(side="right")
-                parts.append(l2)
-            base = b["bg"]
-            for w in parts:
-                w.bind("<Button-1>", lambda e, o=opt: self._answer(item, o))
-                w.bind("<Enter>", lambda e, ps=parts: [q.configure(bg=BORDER) for q in ps])
-                w.bind("<Leave>", lambda e, ps=parts, c=base: [q.configure(bg=c) for q in ps])
-        row = tk.Frame(self.ask, bg=SURFACE)
-        row.pack(fill="x", pady=(p(4), 0))
-        entry = tk.Entry(row, bg=BG, fg=FG, insertbackground=FG, relief="flat", font=self.f_small,
-                         highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
-        entry.pack(side="left", fill="x", expand=True, ipady=p(4))
-        hint = "Another option, or ask a follow-up"
-        entry.insert(0, hint)
-        entry.configure(fg=FAINT)
-
-        def focus_in(_e):
-            if entry.get() == hint:
-                entry.delete(0, "end")
-                entry.configure(fg=FG)
-        entry.bind("<FocusIn>", focus_in)
-        send = tk.Label(row, text="Send", bg=ACCENT, fg="#111111", font=self.f_small, padx=p(10), pady=p(4),
-                        cursor="hand2")
-        send.pack(side="right", padx=(p(6), 0))
-        send.bind("<Button-1>", lambda e: entry.get() != hint and self._answer(item, entry.get()))
-        entry.bind("<Return>", lambda e: self._answer(item, entry.get()))
-        Tooltip(entry, lambda: "Another option, or a follow-up question", self)
-
-    def _pending_decision(self, cur):
-        """The decision to show: the playing item's, else the newest unanswered one from the last day."""
-        if cur and cur.get("decision") and cur["id"] not in self.answered:
-            return cur
-        if self._ask_item and self._ask_item["id"] not in self.answered:
-            return self._ask_item
-        return None
-
-    # ---------------------------------------------------------- rows
-    def _row(self, parent, item, kind):
-        """One queue or history row. Hover shows its action; click opens details (history)."""
-        tk, p = self.tk, self.px
-        row = tk.Frame(parent, bg=BG, cursor="hand2")
-        row.pack(fill="x", pady=(0, 1))
-        grid = tk.Frame(row, bg=BG)
-        grid.pack(fill="x", padx=p(6), pady=p(4))
-        grid.columnconfigure(1, weight=1)
-        line = tk.Frame(grid, bg=BG)
-        line.grid(row=0, column=1, sticky="w")
-        widgets = [row, grid, line]
-        if kind == "history":
-            t = tk.Label(grid, text=self._when(item["ts"]), bg=BG, fg=FAINT, font=self.f_small, width=8, anchor="nw")
-            t.grid(row=0, column=0, rowspan=2, sticky="nw", pady=(p(1), 0))
-            widgets.append(t)
-        name = tk.Label(line, text=item.get("project") or "?", bg=BG, fg=FG, font=self.f_row, anchor="w")
-        name.pack(side="left")
-        widgets.append(name)
-        tag = _STATUS_TAGS.get(item.get("status", ""), "" if item.get("status") in ("spoken", "queued", None)
-                               else item.get("status", "").split(":")[0][:14])
-        if tag:
-            tl = tk.Label(line, text=tag.upper(), bg=SURFACE, fg=MUTED, font=self.f_tag, padx=p(4))
-            tl.pack(side="left", padx=(p(6), 0))
-            widgets.append(tl)
-        act = self._icon_btn(grid, "replay" if kind == "history" else "remove",
-                             (lambda: self._replay(item["id"])) if kind == "history"
-                             else (lambda: self.vq.remove(item["id"])),
-                             "Replay" if kind == "history" else "Remove from the queue")
-        act.configure(fg=BG)
-        act.grid(row=0, column=2, rowspan=2, sticky="e")
-        snip = tk.Label(grid, text=item.get("text", "")[:80], bg=BG, fg=MUTED, font=self.f_small, anchor="w")
-        snip.grid(row=1, column=1, sticky="we")
-        widgets.append(snip)
-
-        def paint(on):
-            c = HOVER if on else BG
-            for w in widgets:
-                w.configure(bg=c)
-            act.configure(bg=c, fg=FG if on else c)
-
-        def leave(e):
-            w = row.winfo_containing(e.x_root, e.y_root)
-            while w is not None and w is not row:
-                w = getattr(w, "master", None)
-            if w is not row:
-                paint(False)
-
-        for w in widgets:
-            w.bind("<Enter>", lambda e: paint(True), add="+")
-            w.bind("<Leave>", leave, add="+")
-            if kind == "history" and w is not act:
-                w.bind("<Button-1>", lambda e, i=item["id"]: self._toggle_detail(i))
-                w.bind("<Double-Button-1>", lambda e, i=item["id"]: self._replay(i))
-                w.bind("<Button-3>", lambda e, i=item["id"]: self._row_menu(e, i))
-        if kind == "history" and self._open_row == item["id"]:
-            self._detail(row, item)
-        return row
-
-    def _detail(self, parent, item):
-        tk, p = self.tk, self.px
-        d = tk.Frame(parent, bg=SURFACE, padx=p(10), pady=p(8))
-        d.pack(fill="x", padx=p(6), pady=(0, p(6)))
-        tk.Label(d, text=item.get("text", ""), bg=SURFACE, fg=FG, font=self.f_small, anchor="w", justify="left",
-                 wraplength=self.W - p(70)).pack(fill="x")
-        where = item.get("cwd") or "unknown folder"
-        sid = (item.get("session_id") or "")[:8]
-        tk.Label(d, text=f"{where}" + (f"  ·  session {sid}" if sid else ""), bg=SURFACE, fg=FAINT,
-                 font=self.f_small, anchor="w", justify="left", wraplength=self.W - p(70)).pack(fill="x", pady=(p(4), p(6)))
-        bar = tk.Frame(d, bg=SURFACE)
-        bar.pack(fill="x")
-
-        def link(text, cmd):
-            l = tk.Label(bar, text=text, bg=SURFACE, fg=ACCENT, font=self.f_small, cursor="hand2")
-            l.bind("<Button-1>", lambda e: cmd())
-            l.bind("<Enter>", lambda e: l.configure(fg=ACCENT_HI))
-            l.bind("<Leave>", lambda e: l.configure(fg=ACCENT))
-            l.pack(side="left", padx=(0, p(14)))
-            return l
-
-        link("Replay", lambda: self._replay(item["id"]))
-        link("Open session", lambda: self._open(item))
-        if item.get("decision") and not item.get("answer"):
-            link("Answer", lambda: (self.answered.discard(item["id"]), setattr(self, "_ask_item", item)))
-        if item.get("session_id"):
-            link("Copy resume command", lambda: self._copy(self._resume_cmd(item), "Resume command copied"))
-        if item.get("cwd"):
-            link("Copy folder", lambda: self._copy(item["cwd"], "Folder copied"))
-        self.flash = tk.Label(bar, text="", bg=SURFACE, fg=GREEN, font=self.f_small)
-        self.flash.pack(side="right")
-
-    @staticmethod
-    def _resume_cmd(item) -> str:
-        return f'cd "{item.get("cwd")}"; claude --resume {item["session_id"]}'
-
-    def _refresh_queue(self, q):
-        sig = tuple(i["id"] for i in q)
-        if sig == self._queue_sig:
-            return
-        self._queue_sig = sig
-        for w in self.q_box.winfo_children():
-            w.destroy()
-        if q:
-            self.q_head.pack(fill="x", pady=(0, p2 := self.px(2)), before=self.h_head)
-            self.q_box.pack(fill="x", pady=(0, self.px(8)), before=self.h_head)
-            for i in q[:6]:
-                self._row(self.q_box, i, "queue")
-        else:
-            self.q_head.pack_forget()
-            self.q_box.pack_forget()
-
-    def _refresh_history(self, force=False):
-        rows = sorted(self.vq.history.recent(150), key=lambda r: r.get("ts", 0), reverse=True)
-        sig = (tuple((r["id"], r.get("status")) for r in rows), self._open_row)
-        if sig == self._hist_sig and not force:
-            return
-        self._hist_sig = sig
-        for w in self.h_box.winfo_children():
-            w.destroy()
-        if not rows:
-            self.tk.Label(self.h_box, text="Nothing yet. Voiceovers from the last 7 days show up here.", bg=BG,
-                          fg=FAINT, font=self.f_small, anchor="w").pack(fill="x", pady=self.px(8))
-        day = None
-        for r in rows:
-            d = self._day(r["ts"])
-            if d != day:
-                day = d
-                self.tk.Label(self.h_box, text=d, bg=BG, fg=MUTED, font=self.f_row, anchor="w").pack(
-                    fill="x", padx=self.px(6), pady=(self.px(8), self.px(2)))
-            self._row(self.h_box, r, "history")
-
-    # ---------------------------------------------------------- actions
-    def _toggle_detail(self, item_id):
-        self._open_row = None if self._open_row == item_id else item_id
-        self._refresh_history()
-
-    def _replay(self, item_id):
-        if self.vq.muted:
-            self.vq.set_muted(False)
-        self.vq.replay(item_id)
-
-    def _replay_last(self):
-        rows = [r for r in self.vq.history.recent(20) if r.get("status") == "spoken"] or self.vq.history.recent(1)
-        if rows:
-            self._replay(rows[0]["id"])
-
-    def _row_menu(self, e, item_id):
-        r = self.vq.history.get(item_id)
-        if not r:
-            return
-        m = self.tk.Menu(self.root, tearoff=0)
-        m.add_command(label="Replay", command=lambda: self._replay(item_id))
-        if r.get("session_id"):
-            m.add_command(label="Copy resume command", command=lambda: self._copy(self._resume_cmd(r)))
-        if r.get("cwd"):
-            m.add_command(label="Copy folder path", command=lambda: self._copy(r["cwd"]))
-        m.tk_popup(e.x_root, e.y_root)
-
-    def _copy(self, s, note=""):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(s)
-        if note and getattr(self, "flash", None) is not None:
-            try:
-                self.flash.configure(text=note)
-                self.flash.after(1800, lambda: self.flash.winfo_exists() and self.flash.configure(text=""))
-            except self.tk.TclError:
-                pass
-
-    def _menu(self, e):
-        m = self.tk.Menu(self.root, tearoff=0)
-        m.add_command(label="Hide until next voiceover   Esc", command=self.hide_until_next)
-        m.add_command(label="Hide for 1 hour, even while speaking", command=lambda: self._hide(3600))
-        m.add_command(label="Clear the queue", command=self.vq.clear)
-        m.add_separator()
-        m.add_command(label="Quit voice queue", command=self.quit)
-        m.tk_popup(e.x_root, e.y_root)
-
-    def _hide(self, secs):
-        self.hidden_for_next = None
-        self.hidden_until = time.time() + secs
-        self.root.withdraw()
-
-    def show(self):
-        self.hidden_until, self.hidden_for_next = 0.0, None
-        self.root.deiconify()
-        self.root.lift()
-        self.root.attributes("-topmost", True)
-        self.root.after(50, self._round_corners)
-
-    def hide_until_next(self):
-        """Out of the way now; back as soon as a different voiceover starts (the current one keeps playing)."""
-        cur = self.vq.state()["current"]
-        self.hidden_until = 0.0
-        self.hidden_for_next = (cur or {}).get("id", "")
-        self.root.withdraw()
-
-    def quit(self):
-        self.vq.stop()
-        self.root.destroy()
-
-    def toggle_expand(self):
-        self.expanded = not self.expanded
-        self._set_icon(self.b_more, "up" if self.expanded else "down")
-        if self.expanded:
-            self.more.pack(fill="both", expand=True)
-            self._queue_sig = self._hist_sig = None
-        else:
-            self.more.pack_forget()
-        self._tick_once()
-        self._fit()
-
-    def toggle_pause(self):
-        self.vq.resume() if self.vq.paused else self.vq.pause()
-
-    def toggle_mute(self):
-        self.vq.set_muted(not self.vq.muted)
-
-    # ---------------------------------------------------------- refresh
-    def _tick(self):
-        try:
-            self._tick_once()
-        except Exception as e:  # one bad frame must not stop the player from ever updating again
-            log(f"tick error: {e!r}")
-        if not self.vq._stop:
-            self.root.after(250, self._tick)
-
-    def _tick_once(self):
-        if self.vq._stop:
-            self.root.destroy()
-            return
-        st = self.vq.state()
-        cur, q = st["current"], st["queue"]
-        if self.vq.show_requested:
-            self.vq.show_requested = False
-            self.show()
-        if self.vq.hide_requested:
-            self.vq.hide_requested = False
-            self.hide_until_next()
-            cur = self.vq.state()["current"]
-        if self.hidden_until and time.time() >= self.hidden_until:
-            self.show()
-        if self.hidden_for_next is not None and cur and cur.get("id") != self.hidden_for_next:
-            log(f"showing again for {cur.get('id')}")
-            self.show()
-        self.vq.window["hidden"] = ("until next voiceover" if self.hidden_for_next is not None else
-                                    time.strftime("until %H:%M", time.localtime(self.hidden_until))
-                                    if self.hidden_until else None)
-
-        # status
-        if st["muted"]:
-            status, color = "Muted · replies go to history only", FAINT
-        elif st["paused"]:
-            status, color = "Paused", AMBER
-        elif cur:
-            status, color = ("Replaying" if cur.get("replay_of") else "Playing"), ACCENT
-        else:
-            status, color = "Idle", GREEN
-        self.status.configure(text=status)
-        self.dot.itemconfigure(self.dot_id, fill=color)
-        self._set_icon(self.b_mute, "mute" if st["muted"] else "volume")
-        self.b_mute.configure(fg=ACCENT if st["muted"] else self.b_mute.cget("fg"))
-        if q:
-            self.badge.configure(text=f"{len(q)} up next")
-            self.badge.pack(side="left", padx=(self.px(8), 0))
-        else:
-            self.badge.pack_forget()
-
-        # body
-        mode = "now" if (cur or q) else "idle"
-        if mode != self._mode:
-            self._mode = mode
-            self.now.pack_forget()
-            self.idle.pack_forget()
-            (self.now if mode == "now" else self.idle).pack(fill="x", before=self.more if self.expanded else None)
-        if mode == "now":
-            show = cur or {**q[0], "status": "preparing"}
-            self._shown = show
-            self.project.configure(text=show.get("project") or "?", fg=ACCENT if cur and not st["paused"] else FG)
-            sid = (show.get("session_id") or "")[:8]
-            self.meta.configure(text=self._when(show["ts"]) + (f"  ·  session {sid}" if sid else "")
-                                + ("  ·  replay" if show.get("replay_of") else ""))
-            text = show.get("text", "") if show.get("ready", True) else "Summarizing the reply…"
-            self.body.configure(text=text if len(text) <= 230 else text[:227].rstrip() + "\u2026")
-            pos, dur = (cur or {}).get("position", 0), (cur or {}).get("duration", 0)
-            self.t_pos.configure(text=self._clock(pos))
-            self.t_dur.configure(text=self._clock(dur) if dur else "--:--")
-            if self._scrub is None:
-                self._draw_bar(pos / dur if dur else 0)
-            self._set_icon(self.b_pause, "play" if st["paused"] else "pause")
-            self.next_hint.configure(text=(f"Next: {q[0].get('project')}" if q else "Nothing after this"))
-        else:
-            last = self.vq.history.recent(1)
-            if last:
-                self.idle_text.configure(text=f"Last: {last[0].get('project')} · {self._when(last[0]['ts'])}")
-                self.idle_replay.pack(side="right")
-            else:
-                self.idle_text.configure(text="Waiting for the next reply")
-                self.idle_replay.pack_forget()
-
-        if cur and cur.get("decision") and cur["id"] not in self.answered:
-            self._ask_item = cur
-        ask = self._pending_decision(cur)
-        sig = ask["id"] if ask else None
-        if sig != self._ask_sig:
-            self._ask_sig = sig
-            if ask:
-                self._build_ask(ask)
-                self.ask.pack(fill="x", pady=(self.px(10), 0), after=self.now if mode == "now" else self.idle)
-            else:
-                self.ask.pack_forget()
-
-        if self.expanded:
-            self._refresh_queue(q)
-            self._refresh_history()
-        try:
-            self.vq.window["geometry"] = [self.root.winfo_x(), self.root.winfo_y(),
-                                          self.root.winfo_width(), self.root.winfo_height()]
-        except self.tk.TclError:
-            pass
-        self._fit()
-
-    def run(self):
-        self.root.mainloop()
-
-
 # ---------------------------------------------------------------- main
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1430,7 +755,9 @@ def main(argv=None) -> int:
         except KeyboardInterrupt:
             pass
     else:
-        Widget(vq).run()
+        from types import SimpleNamespace
+        from player import Widget
+        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session)).run()
     vq.stop()
     server.shutdown()
     return 0

@@ -421,18 +421,37 @@ Model weights are distributed by [hexgrad](https://huggingface.co/hexgrad/Kokoro
 
 ## Voice queue (voiced.py)
 
-The Stop hook no longer plays audio itself. It posts each blurb to one local daemon, `voiced.py`
-(127.0.0.1:4712, started by the hook on demand), which:
+The Stop hook no longer plays audio itself. It posts each reply to one local daemon, `voiced.py`
+(127.0.0.1:4712, started by the hook on demand; only one copy can run), which:
 
-- speaks one reply at a time, oldest first, so parallel sessions never talk over each other
-- starts each one with where it came from ("From agentic os v2.", "From a pytest run.")
-- records replies from headless runs (`claude -p`, SDK) in history without speaking them
-  (`voiced.py --speak-headless` or `VOICED_SPEAK_HEADLESS=1` to speak them too)
-- shows a small always-on-top player. Idle, it is one line with the last voiceover and a replay button.
-  Playing, it shows the project, session, text, progress, play/pause and skip (Space, Right arrow).
-  The arrow opens Up next (hover a row to remove it) and the last 7 days, grouped by day: hover a row
-  for its replay button, click it for the full text, folder and a Copy resume command link. Drag to move. The X button (or Esc) hides it until the next voiceover starts; right-click the
-  header to hide it for an hour even while speaking, or quit.
+- turns each reply into a short spoken summary (`claude -p --model haiku`, hooks off): what was done and what
+  you need to do, never code or JSON. `--raw` or `VOICED_SUMMARY=0` speaks a cleaned-up excerpt instead
+- speaks one reply at a time, so parallel sessions never talk over each other. Replies that need a decision
+  play before plain status updates; a burst of 3+ from one folder is spoken once with a count
+- records headless runs (`claude -p`, SDK, batch prompts) in history without speaking them
+  (`--speak-headless` or `VOICED_SPEAK_HEADLESS=1` to speak them too)
 - keeps history as text in `%LOCALAPPDATA%\local-tts\history.jsonl` (7 days; replays are synthesized again)
+
+### The player (player.py)
+
+A floating capsule in the MadeFire style (Outfit, DM Sans and JetBrains Mono are bundled in `fonts/` and
+loaded for this process only). The ember orb plays and pauses; it breathes, and the card's rim glows, while a
+reply is speaking. Three sizes:
+
+- **Capsule**: project, one line of the summary, progress, and a badge for calls waiting on you
+- **Panel** (chevron or badge): the full summary, a scrub bar, skip, and **your calls**: every unanswered
+  decision from the last 24 hours across all projects, newest first (arrows step through them). Pick an
+  option (or press 1-9), or type another option or a follow-up and press Enter: it is sent to that session
+  with `claude --resume <id> -p` in the background, and the session's reply plays here. A call disappears
+  once you answer it, dismiss it, or the session replies again (you answered it there)
+- **Library** (Queue & history): up next and the last 7 days. Click a row for the full text, Replay,
+  Open session, Answer and Copy resume. Background runs are counted, not listed
+
+Click the project name to open the session it came from. Right-click for: hide for an hour, mute one noisy
+project for an hour, clear the queue, quit. Esc or X hides it until the next voiceover. Keys (after
+clicking the player): Space pause, Right skip, M mute, 1-9 pick an option.
+
+It is light: one canvas, no widget per row, and animations run only while something moves (about 1% of a
+core idle, 5% while speaking).
 
 Tests: `venv\Scripts\python.exe -m unittest test_voiced`

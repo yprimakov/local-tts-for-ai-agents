@@ -185,6 +185,17 @@ class ApiTests(unittest.TestCase):
             vq.stop()
 
 
+class SingleDaemonTests(unittest.TestCase):
+    def test_second_daemon_cannot_bind(self):
+        srv = voiced.make_server(None, 0)
+        port = srv.server_address[1]
+        try:
+            with self.assertRaises(OSError):
+                voiced.make_server(None, port)
+        finally:
+            srv.server_close()
+
+
 class SpeechTests(unittest.TestCase):
     def test_machine_output_detected(self):
         self.assertTrue(voiced.looks_machine('{"messages":[{"sender":"Boris","to":"Matt"}]}'))
@@ -260,6 +271,23 @@ class SummaryQueueTests(unittest.TestCase):
     def test_headless_flag_from_hook(self):
         it = self.vq.say("x", cwd="C:/a", message="hi there friend", entrypoint="claude-desktop", headless=True)
         self.assertEqual(it["status"], "not spoken: headless run")
+
+    def test_call_plays_before_plain_updates(self):
+        self.vq.pause()
+        a = self.vq.say("x", cwd="C:/a", message="Build finished fine", entrypoint="cli")
+        b = self.vq.say("x", cwd="C:/b", message="Tests all pass now", entrypoint="cli")
+        c = self.vq.say("x", cwd="C:/c", message="Should I deploy now?", entrypoint="cli")
+        self.assertTrue(wait(lambda: all(i.get("ready") for i in self.vq.state()["queue"])))
+        self.assertEqual([i["id"] for i in self.vq.state()["queue"]], [c["id"], a["id"], b["id"]])
+
+    def test_quiet_project_goes_to_history_only(self):
+        self.vq.pause()
+        a = self.vq.say("x", cwd="C:/noisy", message="First update here", entrypoint="cli")
+        self.vq.quiet_project(a["project"], 3600)
+        self.assertEqual(self.vq.state()["queue"], [])
+        b = self.vq.say("x", cwd="C:/noisy", message="Second update here", entrypoint="cli")
+        self.assertEqual(b["status"], "not spoken: project muted")
+        self.assertEqual(self.h.get(a["id"])["status"], "not spoken: project muted")
 
 
 if __name__ == "__main__":
