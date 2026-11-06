@@ -457,7 +457,7 @@ class Widget:
                                       tags=("cap", "drag"))
         self.cap_track = c.create_line(p(66), p(55), p(200), p(55), fill=HAIR, width=max(1, p(2)), tags=("cap",))
         self.cap_fill = c.create_line(p(66), p(55), p(66), p(55), fill=AMBER, width=max(1, p(2)), tags=("cap",))
-        c.tag_bind("capname", "<Button-1>", lambda e: self._open(self._shown))
+        c.tag_bind("capname", "<Button-1>", lambda e: self._open(self._shown or self._call()))
         c.tag_bind("capname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.cap_name, EMBER)))
         c.tag_bind("capname", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.cap_name, FG)))
         self._tipify("capname", lambda: "Open this session")
@@ -483,7 +483,7 @@ class Widget:
                                        tags=("pan", "panname"))
         self.pan_meta = c.create_text(p(78), p(53), anchor="w", text="", font=self.F["meta"], fill=MUTED,
                                       tags=("pan", "drag"))
-        c.tag_bind("panname", "<Button-1>", lambda e: self._open(self._shown))
+        c.tag_bind("panname", "<Button-1>", lambda e: self._open(self._shown or self._call()))
         c.tag_bind("panname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.pan_name, EMBER)))
         c.tag_bind("panname", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.pan_name, FG)))
         self._tipify("panname", lambda: "Open this session")

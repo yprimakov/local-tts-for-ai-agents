@@ -668,14 +668,51 @@ def focus_pid(pid: int, hint: str = "") -> bool:
     return bool(u.SetForegroundWindow(h))
 
 
+_DESKTOP_IDS: dict[str, str] = {}
+_CLI_ID = re.compile(rb'"cliSessionId"\s*:\s*"([0-9a-f-]{36})"')
+
+
+def desktop_session_id(cli_sid: str, root: Path | None = None) -> str:
+    """The Claude app's own id (local_<uuid>) for a Code session, from the CLI session id the hook reports.
+
+    The app's claude://code links only accept its own ids, so linking with the CLI id did nothing. Each desktop
+    session is one JSON file whose first few hundred bytes name its cliSessionId."""
+    if not cli_sid:
+        return ""
+    if cli_sid in _DESKTOP_IDS:
+        return _DESKTOP_IDS[cli_sid]
+    root = root or (Path(os.environ.get("APPDATA", "")) / "Claude" / "claude-code-sessions")
+    try:
+        files = sorted(root.glob("*/*/local_*.json"), key=lambda f: f.stat().st_mtime, reverse=True)
+    except OSError:
+        files = []
+    for f in files:
+        if f.stem in _DESKTOP_IDS.values():
+            continue
+        try:
+            with f.open("rb") as fh:
+                m = _CLI_ID.search(fh.read(600))
+        except OSError:
+            continue
+        if m:
+            _DESKTOP_IDS[m.group(1).decode()] = f.stem
+            if m.group(1).decode() == cli_sid:
+                return f.stem
+    return ""
+
+
 def open_session(item: dict) -> str:
     """Show the session a reply came from. Returns what happened, for the player to say."""
     host = item.get("host") or {}
     kind, sid, cwd = host.get("kind"), item.get("session_id") or "", item.get("cwd") or ""
     try:
-        if kind == "desktop" and sid:
-            os.startfile(f"claude://code/continue?session={sid}")
+        app_id = desktop_session_id(sid) if sys.platform == "win32" else ""
+        if app_id:  # a Claude app session (wherever the reply was spoken from): its own link opens it
+            os.startfile(f"claude://code/continue?session={app_id}&source=desktop_action")
             return "Opened in Claude"
+        if kind == "desktop":  # not found: the app's list of sessions waiting for you
+            os.startfile("claude://code/needs-input?source=desktop_action")
+            return "Opened Claude's sessions waiting for you"
         if kind in HOST_LABEL and focus_pid(int(host.get("pid") or 0), item.get("project") or ""):
             return f"Switched to {HOST_LABEL[kind]}" + (" (pick the tab)" if kind == "terminal" else "")
         if kind in ("vscode", "cursor") and cwd:
