@@ -50,6 +50,75 @@ def data_dir() -> Path:
     return p
 
 
+VOICES = {"af_heart": "Heart", "af_bella": "Bella", "af_nicole": "Nicole", "af_sarah": "Sarah",
+          "am_michael": "Michael", "am_adam": "Adam", "bf_emma": "Emma \u00b7 UK", "bm_george": "George \u00b7 UK"}
+
+# name -> (allowed values, or bool; default). The player draws its settings view from these.
+SETTINGS_SCHEMA = {
+    "text_size": ([0.85, 1.0, 1.15, 1.3, 1.5], 1.0),
+    "opacity": ([0.7, 0.8, 0.9, 1.0], 1.0),
+    "voice": (list(dict.fromkeys([*VOICES, VOICE])), VOICE),
+    "speed": ([0.9, 1.0, 1.1, 1.25, 1.4], SPEED if SPEED in (0.9, 1.0, 1.1, 1.25, 1.4) else 1.0),
+    "summaries": (bool, True),
+    "say_source": (bool, True),
+    "speak_background": (bool, False),
+    "auto_open_calls": (bool, True),
+    "hide_when_idle": (bool, False),
+    "calls_hours": ([6, 12, 24, 72], 24),
+}
+
+
+class Settings:
+    """Player and voice settings in settings.json (path None: memory only, for tests)."""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path
+        self._lock = threading.Lock()
+        self.version = 0
+        self._v = {k: d for k, (_, d) in SETTINGS_SCHEMA.items()}
+        if path:
+            try:
+                saved = json.loads(path.read_text(encoding="utf-8"))
+                self._v.update(self._valid(saved if isinstance(saved, dict) else {}))
+            except (OSError, ValueError):
+                pass
+
+    @staticmethod
+    def _valid(d: dict) -> dict:
+        out = {}
+        for k, v in d.items():
+            if k not in SETTINGS_SCHEMA:
+                continue
+            allowed = SETTINGS_SCHEMA[k][0]
+            if allowed is bool and isinstance(v, bool):
+                out[k] = v
+            elif allowed is not bool and v in allowed:
+                out[k] = v
+        return out
+
+    def get(self, key: str):
+        with self._lock:
+            return self._v[key]
+
+    def all(self) -> dict:
+        with self._lock:
+            return dict(self._v)
+
+    def update(self, **kw) -> dict:
+        ok = self._valid(kw)
+        with self._lock:
+            self._v.update(ok)
+            self.version += 1
+            if self.path:
+                tmp = self.path.with_suffix(".tmp")
+                tmp.write_text(json.dumps(self._v, indent=2), encoding="utf-8")
+                os.replace(tmp, self.path)
+        return ok
+
+    def reset(self) -> None:
+        self.update(**{k: d for k, (_, d) in SETTINGS_SCHEMA.items()})
+
+
 def log(msg: str) -> None:
     try:
         with (data_dir() / "voiced.log").open("a", encoding="utf-8") as f:
@@ -88,13 +157,17 @@ def source_of(cwd: str | None, entrypoint: str | None = None) -> dict:
     return {"project": project, "spoken": spoken, "headless": headless}
 
 
-def spoken_text(item: dict) -> str:
+def spoken_text(item: dict, say_source: bool = True) -> str:
     who = item.get("spoken") or item.get("project") or "a session"
     who = re.sub(r"[-_.]+", " ", who).strip()
-    lead = f"From {who}."
-    if item.get("group_count", 1) > 1:
-        lead = f"From {who}, {item['group_count']} replies. The latest:"
-    return f"{lead} {item.get('text', '')}"
+    n = item.get("group_count", 1)
+    if item.get("no_source"):
+        lead = ""
+    elif say_source:
+        lead = f"From {who}, {n} replies. The latest:" if n > 1 else f"From {who}."
+    else:
+        lead = f"{n} replies. The latest:" if n > 1 else ""
+    return f"{lead} {item.get('text', '')}".strip()
 
 
 # ---------------------------------------------------------------- what gets said
@@ -131,12 +204,12 @@ Yury hears it through a speaker while doing something else. It must save him tim
 Write JSON only, no prose around it, with exactly these keys:
 {{"speak": true or false,
   "summary": "1 to 3 short spoken sentences",
-  "decisions": [] or [{{"question": "...", "options": ["...", "..."], "recommended": index or null}}]}}
+  "decision": null or {{"question": "...", "options": ["...", "..."], "recommended": index or null}}}}
 
 summary: plain conversational English, like a colleague giving a quick update. Say what was done
 and what, if anything, Yury needs to do. No code, JSON, markup, file paths, URLs, IDs, hashes,
 command names or bullet lists. Say numbers and names naturally. Do not start with "The agent".
-decisions: one entry per thing the reply asks Yury to choose or answer, in order. Options are short (at most
+decision: only when the reply asks Yury to choose or answer something. Options are short (at most
 6 words each, 2 to 4 of them). recommended is the index of the option the agent recommends, or null.
 speak: false when the reply is machine output (raw JSON, logs, data dumps) or routine noise with
 nothing worth hearing; then summary is one short sentence saying what kind of output it was.
@@ -170,54 +243,14 @@ def parse_summary(raw: str) -> dict | None:
     if not summary:
         return None
     out = {"speak": bool(d.get("speak", True)), "summary": plain_speech(summary) or summary[:400], "decision": None}
-    decs = d.get("decisions") if isinstance(d.get("decisions"), list) else [d.get("decision")]
-    out["decisions"] = []
-    for dec in decs:
-        if isinstance(dec, dict) and dec.get("question") and isinstance(dec.get("options"), list):
-            opts = [str(o).strip()[:80] for o in dec["options"] if str(o).strip()][:4]
-            rec = dec.get("recommended")
-            if len(opts) >= 2:
-                out["decisions"].append({"question": str(dec["question"]).strip()[:240], "options": opts,
-                                         "recommended": rec if isinstance(rec, int) and 0 <= rec < len(opts) else None})
-    out["decision"] = out["decisions"][0] if out["decisions"] else None
+    dec = d.get("decision")
+    if isinstance(dec, dict) and dec.get("question") and isinstance(dec.get("options"), list):
+        opts = [str(o).strip()[:80] for o in dec["options"] if str(o).strip()][:4]
+        rec = dec.get("recommended")
+        if len(opts) >= 2:
+            out["decision"] = {"question": str(dec["question"]).strip()[:240], "options": opts,
+                               "recommended": rec if isinstance(rec, int) and 0 <= rec < len(opts) else None}
     return out
-
-
-# ---------------------------------------------------------------- calls: decisions waiting on Yury
-BACKGROUND = ("not spoken: headless run", "not spoken: grouped", "not spoken: nothing to say")
-_answers = threading.Lock()
-
-
-def open_calls(rows: list[dict], now: float | None = None) -> list[dict]:
-    """History rows, newest first, whose decision still waits. A later reply from the same session means it was
-    answered there. They stay open as long as history keeps them, so a daily pass can clear them."""
-    now = now or time.time()
-    newest: dict[str, float] = {}
-    for r in rows:
-        sid = r.get("session_id")
-        if sid and r.get("status") not in BACKGROUND:
-            newest[sid] = max(newest.get(sid, 0), r.get("ts", 0))
-    return [r for r in rows if r.get("decision") and not r.get("answer") and not r.get("dismissed")
-            and newest.get(r.get("session_id") or "", 0) <= r.get("ts", 0) + 1
-            and now - r.get("ts", 0) < HISTORY_DAYS * 86400]
-
-
-def answer_call(history: "History", item_id: str, text: str, ix: int | None = None) -> str | None:
-    """Record one answer. Returns what to send the session once every question has one, else None."""
-    with _answers:
-        row = history.get(item_id) or {}
-        ds = [dict(d) for d in (row.get("decisions") or ([row["decision"]] if row.get("decision") else []))]
-        left = [i for i, d in enumerate(ds) if not d.get("answer")]
-        if not left:
-            return None
-        ds[ix if ix in left else left[0]]["answer"] = text
-        left = [i for i, d in enumerate(ds) if not d.get("answer")]
-        if left:
-            history.update(item_id, decisions=ds, decision=ds[left[0]])
-            return None
-        full = text if len(ds) == 1 else "\n".join(f"{i + 1}. {d['question']} {d['answer']}" for i, d in enumerate(ds))
-        history.update(item_id, decisions=ds, answer=full, answered_at=time.time())
-        return full
 
 
 class Summarizer:
@@ -323,10 +356,12 @@ class VoiceQueue:
 
     GROUP_AFTER = 3  # this many waiting from one folder: later ones fold into the last instead of queueing
 
-    def __init__(self, history: History, synth, player, speak_headless: bool = False, summarizer=None):
+    def __init__(self, history: History, synth, player, speak_headless: bool = False, summarizer=None,
+                 settings: Settings | None = None):
         self.history, self.synth, self.make_player = history, synth, player
         self.speak_headless = speak_headless
-        self.summarizer = summarizer
+        self._summarizer = summarizer
+        self.settings = settings or Settings()
         self._todo: deque[dict] = deque()
         self.queue: deque[dict] = deque()
         self.current: dict | None = None
@@ -341,6 +376,10 @@ class VoiceQueue:
         self.hide_requested = False
         self.quiet: dict[str, float] = {}  # project -> muted until (right-click "Mute <project> for 1 hour")
 
+    @property
+    def summarizer(self):
+        return self._summarizer if self.settings.get("summaries") else None
+
     # -- intake
     def say(self, text: str, cwd: str = "", session_id: str = "", entrypoint: str = "",
             silent: str = "", message: str = "", headless: bool = False, host: dict | None = None) -> dict:
@@ -354,7 +393,7 @@ class VoiceQueue:
             item["text"] = plain_speech(message) or (text.strip() if not looks_machine(text) else "")
             if not item["text"]:
                 item["text"] = "Finished with technical output. The details are in the session."
-        if not silent and src["headless"] and not self.speak_headless:
+        if not silent and src["headless"] and not (self.speak_headless or self.settings.get("speak_background")):
             silent = "headless run"
         if not silent and self.muted:
             silent = "muted"
@@ -398,13 +437,12 @@ class VoiceQueue:
                 item = self._todo.popleft()
             out = None
             try:
-                out = self.summarizer(item)
+                out = self._summarizer(item)
             except Exception as e:
                 log(f"summary error: {e!r}")
             with self._cv:
                 if out:
                     item["text"], item["decision"] = out["summary"], out["decision"]
-                    item["decisions"] = out.get("decisions") or ([out["decision"]] if out["decision"] else [])
                     if not out["speak"] and item in self.queue and not item.get("decision"):
                         self.queue.remove(item)
                         item["status"] = "not spoken: nothing to say"
@@ -421,7 +459,6 @@ class VoiceQueue:
                 item["ready"] = True
                 self._cv.notify_all()
             self.history.update(item["id"], text=item["text"], decision=item.get("decision"),
-                                decisions=item.get("decisions") or [],
                                 group_count=item.get("group_count", 1),
                                 **({"status": item["status"]} if item["status"].startswith("not spoken") else {}))
 
@@ -431,6 +468,16 @@ class VoiceQueue:
                 self._player.seek_to(max(0.0, min(1.0, fraction)))
                 if not self.paused:
                     self._player.play()
+    def preview(self, text: str = "Hi Yury. This is how replies will sound.") -> dict:
+        """Play a sample now (voice settings). Not kept in history."""
+        item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": text, "project": "Voice preview",
+                "replay_of": "preview", "no_source": True, "status": "queued", "cwd": "", "session_id": ""}
+        with self._cv:
+            self.queue.appendleft(item)
+            self._cv.notify_all()
+        self.skip() if self.current and self.current.get("replay_of") == "preview" else None
+        return item
+
     def replay(self, item_id: str) -> dict | None:
         old = self.history.get(item_id)
         if not old:
@@ -529,7 +576,7 @@ class VoiceQueue:
             self._skip.clear()
             status = "spoken"
             try:
-                wav = self.synth(spoken_text(item))
+                wav = self.synth(spoken_text(item, self.settings.get("say_source")))
                 if self._skip.is_set():
                     status = "skipped"
                 else:
@@ -560,7 +607,8 @@ class VoiceQueue:
 
 # ---------------------------------------------------------------- Kokoro (loaded once)
 class Kokoro:
-    def __init__(self):
+    def __init__(self, settings: Settings | None = None):
+        self.settings = settings
         self._k = None
         self._lock = threading.Lock()
 
@@ -576,7 +624,9 @@ class Kokoro:
         import numpy as np
         import wave
         with self._lock:
-            samples, sr = self._load().create(text, voice=VOICE, speed=SPEED, lang="en-us")
+            voice = self.settings.get("voice") if self.settings else VOICE
+            speed = self.settings.get("speed") if self.settings else SPEED
+            samples, sr = self._load().create(text, voice=voice, speed=speed, lang="en-us")
         fd, path = tempfile.mkstemp(suffix=".wav", prefix="voiced_")
         os.close(fd)
         with wave.open(path, "w") as wf:
@@ -621,6 +671,8 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 return self._json(200, {"app": "voiced", **vq.state()})
             if self.path.startswith("/history"):
                 return self._json(200, vq.history.recent())
+            if self.path == "/settings":
+                return self._json(200, vq.settings.all())
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
@@ -629,6 +681,9 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 return self._json(403, {"error": "no browser requests"})
             vq = self.server.vq
             d = self._body()
+            if self.path == "/settings":
+                vq.settings.update(**d)
+                return self._json(200, vq.settings.all())
             if self.path == "/say":
                 text = str(d.get("text") or "").strip()
                 if not text:
@@ -812,9 +867,10 @@ def main(argv=None) -> int:
         return 0
     history = History(data_dir() / "history.jsonl")
     summarizer = None if args.raw or os.environ.get("VOICED_SUMMARY") == "0" else Summarizer()
-    vq = VoiceQueue(history, Kokoro(), default_player,
+    settings = Settings(data_dir() / "settings.json")
+    vq = VoiceQueue(history, Kokoro(settings), default_player,
                     speak_headless=args.speak_headless or os.environ.get("VOICED_SPEAK_HEADLESS") == "1",
-                    summarizer=summarizer)
+                    summarizer=summarizer, settings=settings)
     server.vq = vq
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=vq.run, daemon=True).start()
@@ -826,10 +882,8 @@ def main(argv=None) -> int:
             history.prune()
             time.sleep(3600)
     threading.Thread(target=prune, daemon=True).start()
-
-    from ember_sync import EmberSync
-    ember = EmberSync(vq, resume_session, log)
-    threading.Thread(target=ember.run, daemon=True).start()
+    if sys.platform == "win32":  # learn the Claude app's session ids now, so a click opens a session at once
+        threading.Thread(target=desktop_session_id, args=("-",), daemon=True).start()
 
     if args.no_window:
         try:
@@ -840,8 +894,7 @@ def main(argv=None) -> int:
     else:
         from types import SimpleNamespace
         from player import Widget
-        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session,
-                                   answer_call=answer_call, open_calls=open_calls, ember=ember)).run()
+        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session)).run()
     vq.stop()
     server.shutdown()
     return 0

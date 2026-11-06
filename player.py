@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import math
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -46,6 +45,7 @@ GLYPHS = {  # Segoe Fluent Icons on Windows, plain symbols elsewhere
     "volume": ("", "♪"), "mute": ("", "✕"), "down": ("", "⌄"),
     "up": ("", "⌃"), "close": ("", "✕"), "send": ("", "➤"),
     "left": ("", "‹"), "right": ("", "›"),
+    "gear": ("\ue713", "\u2699"),
 }
 STATUS_TAGS = {"not spoken: headless run": "background", "not spoken: muted": "muted",
                "not spoken: project muted": "project muted", "not spoken: do not disturb": "do not disturb",
@@ -270,6 +270,33 @@ class Art:
         return self.get(("glow", w, h, kind), make)
 
 
+class MemSettings:
+    """Stand-in when the queue has no settings store (tests, harness)."""
+    def __init__(self):
+        self.version = 0
+        self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
+                   "say_source": True, "speak_background": False, "auto_open_calls": True,
+                   "hide_when_idle": False, "calls_hours": 24}
+
+    def get(self, k):
+        return self._v[k]
+
+    def update(self, **kw):
+        self._v.update(kw)
+        self.version += 1
+        return kw
+
+    def reset(self):
+        v = self.version
+        self.__init__()
+        self.version = v + 1
+
+
+SIZE_NAMES = {0.85: "Small", 1.0: "Default", 1.15: "Large", 1.3: "Larger", 1.5: "Largest"}
+VOICE_NAMES = {"af_heart": "Heart", "af_bella": "Bella", "af_nicole": "Nicole", "af_sarah": "Sarah",
+               "am_michael": "Michael", "am_adam": "Adam", "bf_emma": "Emma \u00b7 UK", "bm_george": "George \u00b7 UK"}
+
+
 # ---------------------------------------------------------------- the player
 class Widget:
     def __init__(self, vq, api):
@@ -288,31 +315,11 @@ class Widget:
         root.report_callback_exception = lambda *exc: api.log(
             "player error: " + "".join(__import__("traceback").format_exception(*exc))[-1500:])
         root.title("Voice queue")
-        self.S = max(1.0, root.winfo_fpixels("1i") / 96)
-        self.Wp = self.p(W)
-        self.art = Art(self.S)
-        fams = set(tkfont.families(root))
-
-        def fam(*names):
-            return next((n for n in names if n in fams), "TkDefaultFont")
-        outfit_b = fam("VQ Outfit Bold", "Segoe UI Semibold", "DejaVu Sans")
-        outfit = fam("VQ Outfit Semibold", "Segoe UI Semibold", "DejaVu Sans")
-        dm = fam("VQ DM Sans", "Segoe UI", "DejaVu Sans")
-        dm_m = fam("VQ DM Sans Medium", "Segoe UI Semibold", "DejaVu Sans")
-        mono = fam("VQ JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono")
-        icon = next((n for n in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if n in fams), None)
-        self._g = 0 if icon else 1
-
-        def font(family, px, bold=False):
-            return tkfont.Font(root=root, family=family, size=-self.p(px), weight="bold" if bold else "normal")
-        bold_fallback = outfit_b.startswith("Segoe") or outfit_b.startswith("DejaVu")
-        self.F = {
-            "title": font(outfit_b, 17, bold_fallback), "name": font(outfit, 14.5),
-            "q": font(outfit, 15), "body": font(dm, 14), "line": font(dm, 12.5), "meta": font(dm, 11.5),
-            "chip": font(dm_m, 13), "row": font(dm_m, 13), "snip": font(dm, 12), "mono": font(mono, 10),
-            "mono_s": font(mono, 9), "icon": font(icon or dm, 12 if icon else 13), "icon_s": font(icon or dm, 10),
-            "icon_orb": font(icon or dm, 14 if icon else 15), "link": font(dm_m, 12), "entry": font(dm, 13),
-        }
+        self.cfg = getattr(vq, "settings", None) or MemSettings()
+        self.S0 = max(1.0, root.winfo_fpixels("1i") / 96)
+        self._fams = set(tkfont.families(root))
+        self._tkfont = tkfont
+        self._scale_setup()
 
         root.overrideredirect(True)
         root.attributes("-topmost", True)
@@ -355,11 +362,62 @@ class Widget:
         self._badge_left = self.Wp
         self._cap_track_end = self.Wp
         self._bar_y = 0
+        self.view = "now"           # now | settings (panel)
+        self._idle_since = None
+        self._sliders: dict = {}
 
         self._build()
         self._place()
         self._apply_mode(instant=True)
         self._tick()
+
+    def _scale_setup(self):
+        """Sizes and fonts for the current text size setting (all of the player scales with it)."""
+        self._built_size = self.cfg.get("text_size")
+        self.S = self.S0 * float(self._built_size)
+        self.Wp = self.p(W)
+        self.art = Art(self.S)
+        fams, tkfont, root = self._fams, self._tkfont, self.root
+
+        def fam(*names):
+            return next((n for n in names if n in fams), "TkDefaultFont")
+        outfit_b = fam("VQ Outfit Bold", "Segoe UI Semibold", "DejaVu Sans")
+        outfit = fam("VQ Outfit Semibold", "Segoe UI Semibold", "DejaVu Sans")
+        dm = fam("VQ DM Sans", "Segoe UI", "DejaVu Sans")
+        dm_m = fam("VQ DM Sans Medium", "Segoe UI Semibold", "DejaVu Sans")
+        mono = fam("VQ JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono")
+        icon = next((n for n in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if n in fams), None)
+        self._g = 0 if icon else 1
+
+        def font(family, px, bold=False):
+            return tkfont.Font(root=root, family=family, size=-self.p(px), weight="bold" if bold else "normal")
+        bold_fallback = outfit_b.startswith("Segoe") or outfit_b.startswith("DejaVu")
+        self.F = {
+            "title": font(outfit_b, 17, bold_fallback), "name": font(outfit, 14.5),
+            "q": font(outfit, 15), "body": font(dm, 14), "line": font(dm, 12.5), "meta": font(dm, 11.5),
+            "chip": font(dm_m, 13), "row": font(dm_m, 13), "snip": font(dm, 12), "mono": font(mono, 10),
+            "mono_s": font(mono, 9), "icon": font(icon or dm, 12 if icon else 13), "icon_s": font(icon or dm, 10),
+            "icon_orb": font(icon or dm, 14 if icon else 15), "link": font(dm_m, 12), "entry": font(dm, 13),
+            "label": font(dm, 13),
+        }
+
+    def _rebuild(self):
+        """Redraw everything at a new size (text size setting). Keeps position (right edge), mode and state."""
+        self._tip_hide()
+        if self._frame_job:
+            self.root.after_cancel(self._frame_job)
+            self._frame_job = None
+        self._anims.clear()
+        old_w = self.Wp
+        self.c.destroy()
+        self._scale_setup()
+        x, y = self._xy
+        self._xy = (x + old_w - self.Wp, y)
+        self._texts, self._fills, self.chips = {}, {}, []
+        self._layout_key, self._radius, self._edge, self._level = None, None, None, -1
+        self.h = self._target_h = self.p(CAP_H)
+        self._build()
+        self._apply_mode(instant=True)
 
     # ---------------------------------------------------------- tiny utils
     def p(self, n: float) -> int:
@@ -432,7 +490,7 @@ class Widget:
         self.card = c.create_rectangle(0, 0, Wp, self.h, fill=CARD, width=0, tags=("bg",))
         self.rim_top = c.create_line(0, 0, Wp, 0, fill=HAIR, tags=("bg",))
         self.glow_cap = c.create_image(0, 0, anchor="nw", image=self.art.glow(Wp, p(CAP_H), "cap"),
-                                       tags=("bg", "glowcap"))
+                                       tags=("bg", "glowcap"), state="disabled")
         self.glow_pan = c.create_image(0, 0, anchor="nw", image=self.art.glow(Wp, p(240), "pan"),
                                        tags=("bg", "glowpan"), state="hidden")
         self.rim_l = c.create_line(0, 0, 0, self.h, fill=HAIR, tags=("bg",))
@@ -474,7 +532,8 @@ class Widget:
                 ("close", "close", self.hide_until_next, "Hide until the next voiceover (Esc)"),
                 ("size", "down", self._toggle_mode, lambda: "Smaller" if self.mode == "panel" else "Open the panel"),
                 ("mute", "volume", self.toggle_mute, lambda: "Unmute" if self.vq.muted else
-                 "Mute: new replies go to history only (M)")):
+                 "Mute: new replies go to history only (M)"),
+                ("gear", "gear", self._toggle_settings, lambda: "Back" if self.view == "settings" else "Settings")):
             self.btn[name] = self._icon_button(name, glyph, cmd, tip)
 
         # ---- panel
@@ -492,6 +551,7 @@ class Widget:
                                   width=self.Wp - 2 * p(PAD), tags=("pan", "play", "drag"))
         self.bar_hit = c.create_rectangle(p(PAD) - p(4), 0, Wp - p(PAD) + p(4), 0, fill=CARD, width=0,
                                           tags=("pan", "play", "bar"))
+        c.tag_lower(self.bar_hit, self.glow_cap)
         self.bar_track = c.create_line(p(PAD), 0, Wp - p(PAD), 0, fill=HAIR, width=max(1, p(3)), capstyle="round",
                                        tags=("pan", "play", "bar"))
         self.bar_fill = c.create_line(p(PAD), 0, p(PAD), 0, fill=AMBER, width=max(1, p(3)), capstyle="round",
@@ -620,7 +680,9 @@ class Widget:
         return {"bg": bg, "g": g, "tag": tag, "glyph": glyph}
 
     def _btn_color(self, name):
-        return AMBER if name == "mute" and self.vq.muted else MUTED
+        if name == "mute" and self.vq.muted or name == "gear" and self.view == "settings":
+            return AMBER
+        return MUTED
 
     def _set_glyph(self, name, glyph):
         b = self.btn[name]
@@ -734,8 +796,11 @@ class Widget:
         x, y = self._xy
         self.root.geometry(f"+{x}+{y - self.p(10)}")
         self._anim("slide", 0.28, lambda t: self.root.geometry(f"+{x}+{round(y - self.p(10) * (1 - t))}"))
-        self._fade_window(1.0)
+        self._fade_window(self._alpha())
         self._level = -1
+
+    def _alpha(self) -> float:
+        return float(self.cfg.get("opacity"))
 
     def _withdraw(self):
         self._visible = False
@@ -790,6 +855,8 @@ class Widget:
         self.mode = mode
         if mode == "cap":
             self.lib = False
+            self.view = "now"
+            self.c.delete("set")
             self._auto_open = None
             if self.root.focus_get() is self.entry:
                 self.root.focus_set()
@@ -810,7 +877,7 @@ class Widget:
             c.itemconfigure("lib", state="hidden")
             c.itemconfigure("glowpan", state="hidden")
             c.itemconfigure("cap", state="normal")
-            c.itemconfigure("glowcap", state="normal")
+            c.itemconfigure("glowcap", state="disabled")
         else:
             c.itemconfigure("cap", state="hidden")
             c.itemconfigure("glowcap", state="hidden")
@@ -840,8 +907,8 @@ class Widget:
     def _place_buttons(self):
         p, Wp, c = self.p, self.Wp, self.c
         y = p(CAP_H / 2) if self.mode == "cap" else p(PAD + ORB / 2)
-        names = ("close", "size") if self.mode == "cap" else ("close", "size", "mute")
-        for i, name in enumerate(("close", "size", "mute")):
+        names = ("close", "size") if self.mode == "cap" else ("close", "size", "mute", "gear")
+        for i, name in enumerate(("close", "size", "mute", "gear")):
             b = self.btn[name]
             if name in names:
                 x = Wp - p(12 if self.mode == "cap" else 10) - p(15) - i * p(31)
@@ -940,17 +1007,21 @@ class Widget:
         now = time.time()
         calls, seen = [], set()
         rows = self.vq.history.recent(150)
+        newest: dict[str, float] = {}  # a later reply from the same session means it was answered there
+        for r in rows:
+            sid = r.get("session_id")
+            if sid and r.get("status") not in BACKGROUND:
+                newest[sid] = max(newest.get(sid, 0), r.get("ts", 0))
         if cur and cur.get("decision") and (cur.get("replay_of") or cur["id"]) not in self.answered:
-            cid = cur.get("replay_of") or cur["id"]
-            row = self.vq.history.get(cid) or {}
-            if not row.get("answer") and not row.get("dismissed"):
-                calls.append({**cur, "decision": row.get("decision") or cur["decision"]})
-                seen.add(cid)
-        for r in self.api.open_calls(rows, now):
-            if r["id"] not in self.answered and r["id"] not in seen:
+            calls.append(cur)
+            seen.add(cur.get("replay_of") or cur["id"])
+        for r in rows:
+            stale = newest.get(r.get("session_id") or "", 0) > r.get("ts", 0) + 1
+            if (r.get("decision") and not r.get("answer") and not r.get("dismissed") and not stale
+                    and r["id"] not in self.answered and r["id"] not in seen
+                    and now - r.get("ts", 0) < 3600 * float(self.cfg.get("calls_hours"))):
                 calls.append(r)
                 seen.add(r["id"])
-        calls += [r for r in self.api.ember.remote_calls if r["id"] not in self.answered]  # Ember's own cards
         return calls
 
     def _call(self):
@@ -974,8 +1045,7 @@ class Widget:
             return
         cid = self._call_id(item)
         self.answered.add(cid)
-        if not item.get("remote"):
-            self.vq.history.update(cid, dismissed=True)
+        self.vq.history.update(cid, dismissed=True)
         self._after_call()
 
     def _after_call(self):
@@ -1017,20 +1087,8 @@ class Widget:
 
     def _answer(self, item, text):
         cid = self._call_id(item)
-        if item.get("remote"):
-            if text not in item["decision"]["options"]:
-                self._toast("Pick one of the options for an Ember card")
-                return
-            self.answered.add(cid)
-            threading.Thread(target=self.api.ember.answer_remote, args=(item, text), daemon=True).start()
-            self._toast("Sent to Ember")
-            self._after_call()
-            return
-        text = self.api.answer_call(self.vq.history, cid, text)
-        if text is None:  # more questions from the same reply
-            self._after_call()
-            return
         self.answered.add(cid)
+        self.vq.history.update(cid, answer=text, answered_at=time.time())
         if self.api.resume_session(self.vq, item, text):
             self._toast(f"Sent to {item.get('project')}. Its reply will play here")
         else:
@@ -1063,7 +1121,7 @@ class Widget:
         self._toast_until = time.time() + 2.6
         self._text(self.cap_line, self._ellipsize(text, self.F["line"], self._cap_line_w()))
         self._fill(self.cap_line, EMBER)
-        self._text(self.pan_meta, self._ellipsize(text, self.F["meta"], self.Wp - self.p(78) - self.p(106)))
+        self._text(self.pan_meta, self._ellipsize(text, self.F["meta"], self.Wp - self.p(78) - self.p(138)))
         self._fill(self.pan_meta, EMBER)
 
     def _replay(self, item_id):
@@ -1101,6 +1159,18 @@ class Widget:
         if self.vq.hide_requested:
             self.vq.hide_requested = False
             self.hide_until_next()
+        # settings changed from outside the player (the HTTP API or settings.json)
+        if self.cfg.get("text_size") != self._built_size:
+            self._built_size = self.cfg.get("text_size")
+            self.root.after(10, self._rebuild)
+            return
+        if self.cfg.get("opacity") != getattr(self, "_built_alpha", None):
+            self._built_alpha = self.cfg.get("opacity")
+            if getattr(self, "_visible", False):
+                try:
+                    self.root.attributes("-alpha", self._alpha())
+                except self.tk.TclError:
+                    pass
         first = not hasattr(self, "_started")
         if first:
             self._started = True
@@ -1126,12 +1196,24 @@ class Widget:
             self._calls = calls
             if fresh and not first:
                 self._call_ix = new_ids.index(fresh[0])
-                if self.mode == "cap" and self._visible:
+                if not self._visible and self.hidden_for_next is not None:
+                    self.show()  # a decision is waiting: come back even if hidden until the next voiceover
+                if self.mode == "cap" and self._visible and self.cfg.get("auto_open_calls"):
                     self._auto_open = fresh[0]
                     self._set_mode("panel")
             self._layout_key = None
         else:
             self._calls = calls
+
+        # hide when idle (setting): out of the way 8 s after the last reply, back with the next one
+        idle = not cur and not q and not self._calls and self.mode == "cap"
+        if self.cfg.get("hide_when_idle") and idle and self._visible:
+            self._idle_since = self._idle_since or time.time()
+            if time.time() - self._idle_since > 8:
+                self._idle_since = None
+                self.hide_until_next()
+        else:
+            self._idle_since = None
 
         show = cur or (q[0] if q else None)
         self._shown = show
@@ -1221,6 +1303,8 @@ class Widget:
     # ---------------------------------------------------------- panel layout
     def _panel(self, show, cur, q, st, toast, force):
         c, p, Wp = self.c, self.p, self.Wp
+        if self.view == "settings":
+            return self._settings_panel(force)
         call = self._call()
         playing = bool(show)
         body_text = ""
@@ -1248,12 +1332,12 @@ class Widget:
             name = f"{n} call{'s' if n > 1 else ''} waiting on you" if n else "All caught up"
             meta = (f"Last: {last[0].get('project')} · {when(last[0]['ts'])}" if last
                     else "Waiting for the next reply")
-        nmax = Wp - p(78) - p(110)
+        nmax = Wp - p(78) - p(140)
         shown_name = self._ellipsize(name, self.F["title"], nmax)
         if self._text(self.pan_name, shown_name) or force:
             c.coords(self.pan_arrow, p(78) + self.F["title"].measure(shown_name) + p(6), p(31))
         if not toast:
-            self._text(self.pan_meta, self._ellipsize(meta, self.F["meta"], Wp - p(78) - p(106)))
+            self._text(self.pan_meta, self._ellipsize(meta, self.F["meta"], Wp - p(78) - p(138)))
             self._fill(self.pan_meta, MUTED)
         self._text(self.next_t, self._ellipsize(f"Next: {q[0].get('project')}" if q else "Nothing after this",
                                                 self.F["meta"], p(150)))
@@ -1391,10 +1475,261 @@ class Widget:
             c.tag_raise(b["tag"])
         for i in self.corner:
             c.tag_raise(i)
-        c.itemconfigure("glowpan", state="normal")
+        c.itemconfigure("glowpan", state="disabled")
         self._place_buttons()
         c.itemconfigure(self.pan_arrow, state="normal" if show else "hidden")
         self._resize(y)
+
+    # ---------------------------------------------------------- settings view
+    def _toggle_settings(self):
+        self.view = "now" if self.view == "settings" else "settings"
+        self.c.delete("set")
+        self._layout_key = None
+        self._fill(self.btn["gear"]["g"], self._btn_color("gear"))
+        if self.mode == "cap":
+            self._set_mode("panel")  # resets view to now; open settings after
+            self.view = "settings"
+            self._layout_key = None
+        self._tick_once(force=True)
+        self._reveal("set" if self.view == "settings" else "pan")
+
+    def _set(self, key, value):
+        """Change one setting and apply it right away."""
+        self.cfg.update(**{key: value})
+        if key == "text_size":
+            self.root.after(10, self._rebuild)
+            return
+        if key == "opacity" and self._visible:
+            try:
+                self.root.attributes("-alpha", float(value))
+            except self.tk.TclError:
+                pass
+        self._layout_key = None
+        self._tick_once(force=True)
+
+    def _settings_panel(self, force):
+        c, p, Wp = self.c, self.p, self.Wp
+        cfg = self.cfg
+        key = ("settings", getattr(cfg, "version", 0), self.mode)
+        self._text(self.pan_name, "Settings")
+        c.itemconfigure(self.pan_arrow, state="hidden")
+        if time.time() >= self._toast_until:
+            self._text(self.pan_meta, "Changes save as you go")
+            self._fill(self.pan_meta, MUTED)
+        if key == self._layout_key and not force:
+            return
+        self._layout_key = key
+        c.itemconfigure("pan", state="normal")
+        for tag in ("play", "ask", "libtoggle"):
+            c.itemconfigure(tag, state="hidden")
+        c.itemconfigure(self.pan_arrow, state="hidden")
+        c.itemconfigure(self.lst_win, state="hidden")
+        for ids in self.chips:
+            for i in ids:
+                c.delete(i)
+        self.chips = []
+        if self.root.focus_get() is self.entry:
+            self.root.focus_set()
+        c.delete("set")
+        self._sliders = {}
+        x0, x1 = p(PAD), Wp - p(PAD)
+        y = p(PAD + ORB + 18)
+
+        def eyebrow(text, y, link=None):
+            c.create_line(x0, y, x0 + p(20), y, fill=AMBER, tags=("set",))
+            c.create_text(x0 + p(28), y, anchor="w", text=text, font=self.F["mono"], fill=EMBER, tags=("set",))
+            if link:
+                label, fn = link
+                tag = f"setlink{text}"
+                t = c.create_text(x1, y, anchor="e", text=label, font=self.F["mono"], fill=MUTED, tags=("set", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e: fn())
+                c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfigure(t, fill=FG), c.configure(cursor="hand2")))
+                c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfigure(t, fill=MUTED), c.configure(cursor="")))
+            return y + p(22)
+
+        def slider(key, title, stops, names, y):
+            val = cfg.get(key)
+            ix = stops.index(val) if val in stops else 0
+            c.create_text(x0, y + p(8), anchor="w", text=title, font=self.F["label"], fill=BODY, tags=("set",))
+            vt = c.create_text(x1, y + p(8), anchor="e", text=names[ix], font=self.F["mono"], fill=EMBER,
+                               tags=("set",))
+            ty = y + p(34)
+            a, b = x0 + p(10), x1 - p(10)
+            xs = [a + (b - a) * i / (len(stops) - 1) for i in range(len(stops))]
+            tag = f"sl_{key}"
+            c.tag_lower(c.create_rectangle(x0, ty - p(14), x1, ty + p(14), fill=CARD, width=0, tags=("set", "sethit", tag)),
+                        self.glow_cap)  # hit area under the (mouse-transparent) ambient light
+            c.create_line(a, ty, b, ty, fill=HAIR, width=max(1, p(3)), capstyle="round", tags=("set", tag))
+            fill = c.create_line(a, ty, xs[ix], ty, fill=AMBER, width=max(1, p(3)), capstyle="round",
+                                 tags=("set", tag))
+            dots = []
+            for i, x in enumerate(xs):
+                d = c.create_image(x, ty, image=self.art.circle(7, fill=Art._rgba(AMBER if i <= ix else HAIR)),
+                                   tags=("set", tag))
+                dots.append(d)
+                c.create_text(x, ty + p(18), text=self._short(key, stops[i]), font=self.F["mono_s"],
+                              fill=EMBER if i == ix else FAINT, tags=("set", tag))
+            knob = c.create_image(xs[ix], ty, image=self.art.knob(), tags=("set", tag))
+            self._sliders[key] = {"xs": xs, "stops": stops, "names": names, "knob": knob, "fill": fill,
+                                  "dots": dots, "vt": vt, "a": a, "ty": ty, "ix": ix}
+            c.tag_bind(tag, "<ButtonPress-1>", lambda e, k=key: self._slide(k, e.x))
+            c.tag_bind(tag, "<B1-Motion>", lambda e, k=key: self._slide(k, e.x))
+            c.tag_bind(tag, "<ButtonRelease-1>", lambda e, k=key: self._slide_end(k))
+            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+            return ty + p(34)
+
+        def toggle(key, title, hint, y):
+            on = bool(cfg.get(key))
+            tag = f"tg_{key}"
+            h = p(40) if hint else p(32)
+            c.tag_lower(c.create_rectangle(x0 - p(6), y, x1 + p(6), y + h, fill=CARD, width=0, tags=("set", "sethit", tag)),
+                        self.glow_cap)
+            c.create_text(x0, y + p(11), anchor="w", text=title, font=self.F["label"], fill=BODY, tags=("set", tag))
+            if hint:
+                c.create_text(x0, y + p(29), anchor="w", text=hint, font=self.F["meta"], fill=FAINT, tags=("set", tag))
+            sw, sh = p(36), p(20)
+            img = self.art.pill(sw, sh, grad=(AMBER, COOLED)) if on else self.art.pill(sw, sh, outline=(255, 255, 255, 50))
+            cy = y + p(11) if not hint else y + p(16)
+            c.create_image(x1, cy, anchor="e", image=img, tags=("set", tag))
+            kx = x1 - p(10) if on else x1 - sw + p(10)
+            c.create_image(kx, cy, image=self.art.circle(14, fill=Art._rgba(FG if on else MUTED)), tags=("set", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e: self._set(key, not on))
+            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+            return y + h + p(6)
+
+        # appearance
+        y = eyebrow("APPEARANCE", y)
+        y = slider("text_size", "Text size", [0.85, 1.0, 1.15, 1.3, 1.5],
+                   [SIZE_NAMES[v] for v in (0.85, 1.0, 1.15, 1.3, 1.5)], y)
+        y = slider("opacity", "Opacity", [0.7, 0.8, 0.9, 1.0], ["70%", "80%", "90%", "100%"], y) + p(14)
+
+        # voice
+        y = eyebrow("VOICE", y, ("Play a sample", self._preview))
+        voices = list(VOICE_NAMES)
+        cur_v = cfg.get("voice")
+        x, ch = x0, p(32)
+        for v in voices:
+            label = VOICE_NAMES[v]
+            w = self.F["chip"].measure(label) + p(26)
+            if x > x0 and x + w > x1:
+                x, y = x0, y + ch + p(8)
+            sel = v == cur_v
+            base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(255, 255, 255, 36))
+            hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if sel else self.art.pill(
+                w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
+            tag = f"vc_{v}"
+            img = c.create_image(x, y, anchor="nw", image=base, tags=("set", tag))
+            c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=OBSIDIAN if sel else FG,
+                          tags=("set", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e, v=v: (self._set("voice", v), self._preview()))
+            c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, i=img, b=base: (c.itemconfigure(i, image=b), c.configure(cursor="")))
+            x += w + p(8)
+        y += ch + p(14)
+        y = slider("speed", "Speaking speed", [0.9, 1.0, 1.1, 1.25, 1.4], ["0.9\u00d7", "Normal", "1.1\u00d7",
+                                                                          "1.25\u00d7", "1.4\u00d7"], y)
+        y = toggle("say_source", "Say which project first", "\u201cFrom agentic os v2.\u201d before each reply", y)
+        y = toggle("summaries", "Summarize replies", "Off: read a cleaned-up excerpt instead", y)
+        y = toggle("speak_background", "Speak background runs", "Batch and headless runs (always in history)", y)
+        y += p(14)
+
+        # behavior
+        y = eyebrow("BEHAVIOR", y)
+        y = toggle("auto_open_calls", "Open the panel when a call arrives", None, y)
+        y = toggle("hide_when_idle", "Hide when nothing is playing", "Comes back with the next reply or call", y)
+        y = slider("calls_hours", "Keep calls waiting for", [6, 12, 24, 72], ["6 hours", "12 hours", "1 day", "3 days"], y)
+
+        # footer
+        y += p(10)
+        c.create_line(x0, y, x1, y, fill=HAIR, tags=("set",))
+        fy = y + p(20)
+        for label, fn, anchor, x in (("Restore defaults", self._restore_defaults, "w", x0),
+                                     ("Reset position", self._reset_position, "e", x1)):
+            tag = f"ft{label}"
+            t = c.create_text(x, fy, anchor=anchor, text=label, font=self.F["link"], fill=AMBER, tags=("set", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
+            c.tag_bind(tag, "<Enter>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=AMBER), c.configure(cursor="")))
+        y = fy + p(16) + p(R_PANEL)
+        c.tag_raise("set")
+        c.tag_lower("sethit", self.glow_cap)  # hit areas stay under the ambient light
+        c.tag_raise("orb")
+        for b in self.btn.values():
+            c.tag_raise(b["tag"])
+        for i in self.corner:
+            c.tag_raise(i)
+        c.itemconfigure("glowpan", state="disabled")
+        self._place_buttons()
+        self._fill(self.btn["gear"]["g"], self._btn_color("gear"))
+        self._resize(y)
+
+    @staticmethod
+    def _short(key, v):
+        if key == "text_size":
+            return {0.85: "S", 1.0: "M", 1.15: "L", 1.3: "XL", 1.5: "XXL"}[v]
+        if key == "opacity":
+            return f"{int(v * 100)}"
+        if key == "speed":
+            return f"{v:g}\u00d7"
+        if key == "calls_hours":
+            return "3d" if v == 72 else f"{v}h"
+        return str(v)
+
+    def _slide(self, key, x):
+        sl = self._sliders.get(key)
+        if not sl:
+            return
+        c = self.c
+        xs = sl["xs"]
+        ix = min(range(len(xs)), key=lambda i: abs(xs[i] - x))
+        kx = min(max(x, xs[0]), xs[-1])
+        c.coords(sl["knob"], kx, sl["ty"])
+        c.coords(sl["fill"], sl["a"], sl["ty"], kx, sl["ty"])
+        c.itemconfigure(sl["vt"], text=sl["names"][ix])
+        for i, d in enumerate(sl["dots"]):
+            c.itemconfigure(d, image=self.art.circle(7, fill=Art._rgba(AMBER if xs[i] <= kx + 1 else HAIR)))
+        sl["ix"] = ix
+
+    def _slide_end(self, key):
+        sl = self._sliders.get(key)
+        if not sl:
+            return
+        ix, xs = sl["ix"], sl["xs"]
+        x0 = self.c.coords(sl["knob"])[0]
+
+        def snap(t):
+            x = x0 + (xs[ix] - x0) * t
+            self.c.coords(sl["knob"], x, sl["ty"])
+            self.c.coords(sl["fill"], sl["a"], sl["ty"], x, sl["ty"])
+        self._anim("snap", 0.12, snap, done=lambda: (
+            self._set(key, sl["stops"][ix]) if sl["stops"][ix] != self.cfg.get(key) else None))
+
+    def _preview(self):
+        if hasattr(self.vq, "preview"):
+            if self.vq.muted:
+                self.vq.set_muted(False)
+            self.vq.preview()
+            self._toast("Playing a sample")
+
+    def _restore_defaults(self):
+        size = self.cfg.get("text_size")
+        self.cfg.reset()
+        if self.cfg.get("text_size") != size:
+            self.root.after(10, self._rebuild)
+            return
+        try:
+            self.root.attributes("-alpha", self._alpha())
+        except self.tk.TclError:
+            pass
+        self._layout_key = None
+        self._tick_once(force=True)
+
+    def _reset_position(self):
+        x = self.root.winfo_screenwidth() - self.Wp - self.p(24)
+        self._xy = (x, self.p(24))
+        self.root.geometry(f"+{x}+{self.p(24)}")
 
     def _set_lib_glyph(self):
         self._text(self.lib_g, self.glyph("up" if self.lib else "down"))

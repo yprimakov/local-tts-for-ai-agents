@@ -451,6 +451,29 @@ Click the project name to open the session it came from. Right-click for: hide f
 project for an hour, clear the queue, quit. Esc or X hides it until the next voiceover. Keys (after
 clicking the player): Space pause, Right skip, M mute, 1-9 pick an option.
 
+### Settings
+
+The gear button opens Settings. Changes apply at once and are saved to
+`%LOCALAPPDATA%\local-tts\settings.json`:
+
+| Setting | Choices | Default |
+| --- | --- | --- |
+| Text size (scales the whole player) | S, M, L, XL, XXL | M |
+| Opacity | 70, 80, 90, 100% | 100% |
+| Voice (click to hear it) | Heart, Bella, Nicole, Sarah, Michael, Adam, Emma (UK), George (UK) | Heart |
+| Speaking speed | 0.9x to 1.4x | 1x |
+| Say which project first | on/off | on |
+| Summarize replies (off reads a cleaned-up excerpt) | on/off | on |
+| Speak background runs | on/off | off |
+| Open the panel when a call arrives | on/off | on |
+| Hide when nothing is playing | on/off | off |
+| Keep calls waiting for | 6h, 12h, 1 day, 3 days | 1 day |
+
+"Restore defaults" and "Reset position" are at the bottom. Scripts can read and change the same values:
+`GET /settings`, and `POST /settings` with a JSON object of the keys to change (unknown keys and values are
+refused). To add a setting, add it to `SETTINGS_SCHEMA` in `voiced.py` and a control in
+`Widget._settings_panel` in `player.py`.
+
 It is light: one canvas, no widget per row, and animations run only while something moves (about 1% of a
 core idle, 5% while speaking).
 
