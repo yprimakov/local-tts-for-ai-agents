@@ -185,5 +185,82 @@ class ApiTests(unittest.TestCase):
             vq.stop()
 
 
+class SpeechTests(unittest.TestCase):
+    def test_machine_output_detected(self):
+        self.assertTrue(voiced.looks_machine('{"messages":[{"sender":"Boris","to":"Matt"}]}'))
+        self.assertTrue(voiced.looks_machine("Traceback (most recent call last):"))
+        self.assertFalse(voiced.looks_machine("I sent the draft to Gmail. You only need to review it."))
+
+    def test_plain_speech_strips_code(self):
+        t = voiced.plain_speech("Done. Ran `pytest -q` in C:\\x\\y.py.\n```json\n{\"a\":1}\n```\nYou need to approve the PR.")
+        self.assertNotIn("{", t)
+        self.assertNotIn("pytest", t)
+        self.assertIn("approve the PR", t)
+
+    def test_parse_summary(self):
+        raw = 'Here: {"speak": true, "summary": "I fixed the login. Pick a backup option.", "decision": ' \
+              '{"question": "Which backup?", "options": ["Nightly to Mac", "NAS only"], "recommended": 0}}'
+        d = voiced.parse_summary(raw)
+        self.assertEqual(d["decision"]["options"], ["Nightly to Mac", "NAS only"])
+        self.assertEqual(d["decision"]["recommended"], 0)
+        self.assertIsNone(voiced.parse_summary("no json"))
+        bad = voiced.parse_summary('{"summary": "ok", "decision": {"question": "q", "options": ["one"], "recommended": 5}}')
+        self.assertIsNone(bad["decision"])
+
+
+class SummaryQueueTests(unittest.TestCase):
+    def setUp(self):
+        FakePlayer.log, FakePlayer.live, FakePlayer.max_live = [], 0, 0
+        self.h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
+        self.calls = []
+
+        def summarize(item):
+            self.calls.append(item["message"])
+            time.sleep(0.05)
+            if item["message"].startswith("{"):
+                return {"speak": False, "summary": "Raw email data.", "decision": None}
+            return {"speak": True, "summary": "Summary of " + item["message"][:10], "decision":
+                    {"question": "Go?", "options": ["Yes", "No"], "recommended": 0} if "?" in item["message"] else None}
+        self.vq = voiced.VoiceQueue(self.h, fake_synth, FakePlayer, summarizer=summarize)
+        threading.Thread(target=self.vq.run, daemon=True).start()
+        threading.Thread(target=self.vq.summarize_loop, daemon=True).start()
+
+    def tearDown(self):
+        self.vq.stop()
+
+    def test_speaks_summary_not_raw(self):
+        self.vq.say("raw blurb", cwd="C:/a", message="First reply with lots of detail", entrypoint="cli")
+        self.assertTrue(wait(lambda: len(FakePlayer.log) == 1))
+        self.assertIn("Summary of First repl", FakePlayer.log[0])
+        self.assertNotIn("raw blurb", FakePlayer.log[0])
+
+    def test_machine_output_is_not_spoken(self):
+        it = self.vq.say("x", cwd="C:/a", message='{"messages": []}', entrypoint="cli")
+        self.vq.say("y", cwd="C:/b", message="A normal reply", entrypoint="cli")
+        self.assertTrue(wait(lambda: len(FakePlayer.log) == 1))
+        self.assertIn("A normal r", FakePlayer.log[0])
+        self.assertTrue(wait(lambda: self.h.get(it["id"])["status"] == "not spoken: nothing to say"))
+
+    def test_decision_kept(self):
+        it = self.vq.say("x", cwd="C:/a", message="Should I merge?", entrypoint="cli")
+        self.assertTrue(wait(lambda: (self.h.get(it["id"]) or {}).get("decision") is not None))
+        self.assertEqual(self.h.get(it["id"])["decision"]["options"], ["Yes", "No"])
+
+    def test_burst_from_one_folder_is_grouped(self):
+        self.vq.pause()
+        for i in range(8):
+            self.vq.say("x", cwd="C:/p/_timelog", session_id=f"s{i}", message=f"Run {i} done", entrypoint="cli")
+        self.assertEqual(len(self.vq.state()["queue"]), 3)
+        last = self.vq.state()["queue"][-1]
+        self.assertEqual(last["group_count"], 6)
+        self.vq.resume()
+        self.assertTrue(wait(lambda: len(FakePlayer.log) == 3, 5))
+        self.assertIn("6 replies", FakePlayer.log[-1])
+
+    def test_headless_flag_from_hook(self):
+        it = self.vq.say("x", cwd="C:/a", message="hi there friend", entrypoint="claude-desktop", headless=True)
+        self.assertEqual(it["status"], "not spoken: headless run")
+
+
 if __name__ == "__main__":
     unittest.main()

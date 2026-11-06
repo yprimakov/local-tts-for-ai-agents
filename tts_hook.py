@@ -219,6 +219,84 @@ def send(payload: dict, autostart: bool = True) -> bool:
     return False
 
 
+def _ancestors(limit: int = 12) -> list[tuple[int, str]]:
+    """(pid, exe name) from this hook's parent upward. Windows only; cheap (one process snapshot)."""
+    if sys.platform != "win32":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p), ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+    k = ctypes.windll.kernel32
+    snap = k.CreateToolhelp32Snapshot(2, 0)
+    procs = {}
+    try:
+        e = PE()
+        e.dwSize = ctypes.sizeof(PE)
+        ok = k.Process32FirstW(snap, ctypes.byref(e))
+        while ok:
+            procs[e.th32ProcessID] = (e.th32ParentProcessID, e.szExeFile)
+            ok = k.Process32NextW(snap, ctypes.byref(e))
+    finally:
+        k.CloseHandle(snap)
+    out, pid = [], os.getppid()
+    while pid in procs and len(out) < limit:
+        ppid, exe = procs[pid]
+        out.append((pid, exe))
+        if ppid == pid:
+            break
+        pid = ppid
+    return out
+
+
+HOSTS = {"code.exe": "vscode", "cursor.exe": "cursor", "windowsterminal.exe": "terminal", "claude.exe": "desktop",
+         "explorer.exe": None}
+
+
+def host_info() -> dict:
+    """Which app the session runs in (for "open this session"), and whether it is a claude -p run."""
+    chain = _ancestors()
+    info = {}
+    claude_pid = next((pid for pid, exe in chain if exe.lower() in ("claude.exe", "node.exe")), None)
+    for pid, exe in chain:
+        kind = HOSTS.get(exe.lower(), "")
+        if kind is None:
+            break
+        if kind and pid != claude_pid:
+            info = {"kind": kind, "pid": pid, "exe": exe}
+            break
+    if claude_pid:
+        try:  # the command line says whether it is headless (-p / --print)
+            cmd = subprocess.run(["powershell", "-NoProfile", "-Command",
+                                  f"(Get-CimInstance Win32_Process -Filter 'ProcessId={claude_pid}').CommandLine"],
+                                 capture_output=True, text=True, timeout=4,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            info["print_mode"] = bool(re.search(r"(^|\s)(-p|--print)(\s|$)", cmd or ""))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return info
+
+
+def headless_prompt(transcript_path: str) -> bool:
+    """Batch jobs announce themselves in their first prompt ("You are running headless and unattended")."""
+    try:
+        with open(transcript_path, encoding="utf-8") as f:
+            for _, line in zip(range(40), f):
+                d = json.loads(line)
+                if d.get("type") == "user":
+                    c = d.get("message", {}).get("content")
+                    text = c if isinstance(c, str) else " ".join(
+                        x.get("text", "") for x in c or [] if isinstance(x, dict))
+                    return bool(re.search(r"\b(headless|unattended)\b", text[:600], re.I))
+    except (OSError, ValueError, AttributeError):
+        pass
+    return False
+
+
 def main():
     _log("called")
     if not os.path.exists(TOGGLE_FILE):
@@ -244,8 +322,12 @@ def main():
     if len(blurb) < MIN_CHARS:
         return
 
+    host = host_info()
     payload = {
         "text": blurb,
+        "message": message[:8000],
+        "host": host,
+        "headless": bool(host.get("print_mode")) or headless_prompt(data.get("transcript_path") or ""),
         "cwd": data.get("cwd") or os.getcwd(),
         "session_id": data.get("session_id") or "",
         # "cli" for an interactive session; "sdk-*" for claude -p and SDK runs (spoken only with --speak-headless)
