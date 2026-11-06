@@ -204,13 +204,16 @@ Yury hears it through a speaker while doing something else. It must save him tim
 Write JSON only, no prose around it, with exactly these keys:
 {{"speak": true or false,
   "summary": "1 to 3 short spoken sentences",
-  "decision": null or {{"question": "...", "options": ["...", "..."], "recommended": index or null}}}}
+  "decisions": [{{"question": "...", "options": ["...", "..."], "recommended": index or null}}, ...]}}
 
 summary: plain conversational English, like a colleague giving a quick update. Say what was done
 and what, if anything, Yury needs to do. No code, JSON, markup, file paths, URLs, IDs, hashes,
 command names or bullet lists. Say numbers and names naturally. Do not start with "The agent".
-decision: only when the reply asks Yury to choose or answer something. Options are short (at most
-6 words each, 2 to 4 of them). recommended is the index of the option the agent recommends, or null.
+decisions: every separate question the reply asks Yury to choose or answer, in the order asked, at
+most 6; an empty list when it asks nothing. Count each numbered or bulleted question on its own, and
+keep closely tied ones apart only when they need different answers. question: one short spoken-style
+sentence. options: 2 to 4 short choices (at most 6 words each) when the reply offers or implies them,
+or an empty list for an open question. recommended: index of the option the agent recommends, or null.
 speak: false when the reply is machine output (raw JSON, logs, data dumps) or routine noise with
 nothing worth hearing; then summary is one short sentence saying what kind of output it was.
 
@@ -242,15 +245,45 @@ def parse_summary(raw: str) -> dict | None:
     summary = str(d.get("summary") or "").strip()
     if not summary:
         return None
-    out = {"speak": bool(d.get("speak", True)), "summary": plain_speech(summary) or summary[:400], "decision": None}
-    dec = d.get("decision")
-    if isinstance(dec, dict) and dec.get("question") and isinstance(dec.get("options"), list):
-        opts = [str(o).strip()[:80] for o in dec["options"] if str(o).strip()][:4]
+    out = {"speak": bool(d.get("speak", True)), "summary": plain_speech(summary) or summary[:400]}
+    raw_decs = d.get("decisions")
+    if not isinstance(raw_decs, list):
+        raw_decs = [d.get("decision")]  # older single-question shape
+    decs = []
+    for dec in raw_decs:
+        if not (isinstance(dec, dict) and str(dec.get("question") or "").strip()):
+            continue
+        opts = [str(o).strip()[:80] for o in (dec.get("options") or []) if str(o).strip()][:4]
+        if len(opts) < 2:
+            opts = []  # one option is not a choice: answer it in words
         rec = dec.get("recommended")
-        if len(opts) >= 2:
-            out["decision"] = {"question": str(dec["question"]).strip()[:240], "options": opts,
-                               "recommended": rec if isinstance(rec, int) and 0 <= rec < len(opts) else None}
+        decs.append({"question": str(dec["question"]).strip()[:240], "options": opts,
+                     "recommended": rec if opts and isinstance(rec, int) and 0 <= rec < len(opts) else None})
+    out["decisions"] = decs[:6]
+    out["decision"] = decs[0] if decs else None  # kept for older readers: truthy means "needs Yury"
     return out
+
+
+def decisions_of(item: dict) -> list[dict]:
+    """All questions a reply asks Yury (rows from before grouped calls only have `decision`)."""
+    decs = item.get("decisions")
+    if decs:
+        return decs
+    return [item["decision"]] if item.get("decision") else []
+
+
+SKIPPED = "(skipped: use your judgment)"
+
+
+def combined_answer(decs: list[dict], answers: list[str | None]) -> str:
+    """One message back to the session with every answer, so the agent never acts on half of them."""
+    if len(decs) == 1:
+        return answers[0] if answers[0] else SKIPPED
+    lines = ["Yury's answers to your questions:"]
+    for n, (dec, ans) in enumerate(zip(decs, answers), 1):
+        lines.append(f"{n}. {dec['question']}")
+        lines.append(f"   Answer: {ans if ans else SKIPPED}")
+    return "\n".join(lines)
 
 
 class Summarizer:
@@ -442,7 +475,8 @@ class VoiceQueue:
                 log(f"summary error: {e!r}")
             with self._cv:
                 if out:
-                    item["text"], item["decision"] = out["summary"], out["decision"]
+                    item["text"], item["decision"] = out["summary"], out.get("decision")
+                    item["decisions"] = out.get("decisions") or ([out["decision"]] if out.get("decision") else [])
                     if not out["speak"] and item in self.queue and not item.get("decision"):
                         self.queue.remove(item)
                         item["status"] = "not spoken: nothing to say"
@@ -459,6 +493,7 @@ class VoiceQueue:
                 item["ready"] = True
                 self._cv.notify_all()
             self.history.update(item["id"], text=item["text"], decision=item.get("decision"),
+                                decisions=item.get("decisions") or [],
                                 group_count=item.get("group_count", 1),
                                 **({"status": item["status"]} if item["status"].startswith("not spoken") else {}))
 

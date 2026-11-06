@@ -22,6 +22,8 @@ import sys
 import time
 from pathlib import Path
 
+from voiced import SKIPPED, combined_answer, decisions_of
+
 _HERE = Path(__file__).resolve().parent
 
 KEY = "#020203"  # window transparency key: never used for anything drawn
@@ -338,6 +340,7 @@ class Widget:
         self.hidden_until = 0.0
         self.hidden_for_next = None
         self.answered: set[str] = set()
+        self._drafts: dict[str, dict] = {}  # call id -> answers so far, sent together once all are in
         self._call_ix = 0
         self._auto_open = None      # call id that opened the panel by itself
         self._calls: list[dict] = []
@@ -656,6 +659,8 @@ class Widget:
         root.bind("<space>", lambda e: self._key(self.toggle_pause))
         root.bind("<Right>", lambda e: self._key(self.vq.skip))
         root.bind("<m>", lambda e: self._key(self.toggle_mute))
+        root.bind("<Return>", lambda e: self._key(self._enter))
+        root.bind("<s>", lambda e: self._key(self._skip_question))
         for i in range(1, 10):
             root.bind(str(i), lambda e, i=i: self._key(lambda: self._pick_number(i)))
 
@@ -1045,6 +1050,7 @@ class Widget:
             return
         cid = self._call_id(item)
         self.answered.add(cid)
+        self._drafts.pop(cid, None)
         self.vq.history.update(cid, dismissed=True)
         self._after_call()
 
@@ -1056,8 +1062,210 @@ class Widget:
 
     def _pick_number(self, i):
         item = self._call()
-        if item and self.mode == "panel" and i <= len(item["decision"]["options"]):
-            self._answer(item, item["decision"]["options"][i - 1])
+        if not item or self.mode != "panel" or self.view != "now":
+            return
+        decs, d = self._draft(item)
+        if d["ix"] < len(decs) and i <= len(decs[d["ix"]]["options"]):
+            self._reply(item, decs[d["ix"]]["options"][i - 1])
+
+    def _enter(self):
+        """Enter in the review step sends every answer."""
+        item = self._call()
+        if item and self.mode == "panel" and self.view == "now":
+            decs, d = self._draft(item)
+            if len(decs) > 1 and d["ix"] >= len(decs):
+                self._send_all(item)
+
+    def _skip_question(self):
+        item = self._call()
+        if item and self.mode == "panel" and self.view == "now":
+            decs, d = self._draft(item)
+            if len(decs) > 1 and d["ix"] < len(decs):
+                self._reply(item, None)
+
+    # a reply can ask several questions: answer them one by one, then send them together
+    def _draft(self, call):
+        cid = self._call_id(call)
+        decs = decisions_of(call)
+        d = self._drafts.get(cid)
+        if not d or len(d["answers"]) != len(decs):
+            d = self._drafts[cid] = {"answers": [None] * len(decs), "done": [False] * len(decs), "ix": 0}
+        return decs, d
+
+    def _draft_sig(self, call):
+        if not call:
+            return None
+        _, d = self._draft(call)
+        return d["ix"], tuple(d["answers"]), tuple(d["done"])
+
+    def _reply(self, call, text):
+        """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
+        decs, d = self._draft(call)
+        if len(decs) <= 1:
+            self._answer(call, text or SKIPPED)
+            return
+        i = min(d["ix"], len(decs) - 1)
+        d["answers"][i], d["done"][i] = text, True
+        later = [j for j in range(i + 1, len(decs)) if not d["done"][j]]
+        rest = [j for j in range(len(decs)) if not d["done"][j]]
+        d["ix"] = later[0] if later else (rest[0] if rest else len(decs))
+        self._layout_key = None
+        self._tick_once()
+
+    def _goto_question(self, call, i):
+        _, d = self._draft(call)
+        d["ix"] = i
+        self._layout_key = None
+        self._tick_once()
+
+    def _send_all(self, call):
+        decs, d = self._draft(call)
+        self._answer(call, combined_answer(decs, d["answers"]), answers=list(d["answers"]))
+
+    def _set_hint(self, hint):
+        if hint == self._hint:
+            return
+        showing = self.entry.get() == self._hint
+        self._hint = hint
+        if showing and self.root.focus_get() is not self.entry:
+            self.entry.delete(0, "end")
+            self.entry.insert(0, hint)
+
+    def _link(self, x, y, text, fn, tag, anchor="e", color=None, tip=None):
+        """A small mono text button (Back, Skip)."""
+        c = self.c
+        color = color or FAINT
+        t = c.create_text(x, y, anchor=anchor, text=text, font=self.F["mono"], fill=color, tags=("pan", "ask", tag))
+        c.tag_bind(tag, "<Button-1>", lambda e: fn())
+        c.tag_bind(tag, "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure(t, fill=FG)))
+        c.tag_bind(tag, "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure(t, fill=color)))
+        if tip:
+            self._tipify(tag, lambda: tip)
+        self.chips.append((t,))
+        return self.F["mono"].measure(text)
+
+    def _call_steps(self, call, decs, d, y):
+        """Step row: QUESTION 2 OF 3 with Back and Skip, then one segment per question."""
+        c, p, Wp = self.c, self.p, self.Wp
+        n, ix = len(decs), d["ix"]
+        review = ix >= n
+        label = f"{n} ANSWERS READY" if review else f"QUESTION {ix + 1} OF {n}"
+        t = c.create_text(p(PAD), y + p(6), anchor="w", text=label, font=self.F["mono"], fill=MUTED,
+                          tags=("pan", "ask"))
+        self.chips.append((t,))
+        right = Wp - p(PAD)
+        if not review:
+            right -= self._link(right, y + p(6), "Skip", lambda: self._reply(call, None), "qskip",
+                                tip="Leave this one to the agent (S)") + p(16)
+        if ix > 0:
+            self._link(right, y + p(6), "Back", lambda: self._goto_question(call, ix - 1), "qback")
+        y += p(18)
+        gap = p(6)
+        seg = (Wp - 2 * p(PAD) - gap * (n - 1)) / n
+        for j in range(n):
+            x = p(PAD) + j * (seg + gap)
+            col = AMBER if d["done"][j] else (FG if j == ix else HAIR)
+            tag = f"qseg{j}"
+            hit = c.create_rectangle(x, y - p(6), x + seg, y + p(8), fill=CARD, width=0, tags=("pan", "ask", "askhit", tag))
+            ln = c.create_line(x, y + p(1), x + seg, y + p(1), fill=col, width=max(1, p(3)), capstyle="round",
+                               tags=("pan", "ask", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e, j=j: self._goto_question(call, j))
+            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+            self._tipify(tag, lambda j=j: decs[j]["question"])
+            self.chips.append((hit, ln))
+        return y + p(18)
+
+    def _call_chips(self, call, dec, chosen, y):
+        """Option pills. The chosen answer (or else the recommendation) is filled; the recommendation has a star."""
+        c, p, Wp = self.c, self.p, self.Wp
+        x, ch, maxw = p(PAD), p(36), Wp - 2 * p(PAD)
+        rec = dec.get("recommended")
+        opts = dec["options"]
+        filled = opts.index(chosen) if chosen in opts else (rec if chosen is None else None)
+        for n, opt in enumerate(opts):
+            is_fill = filled == n
+            label = ("\u2605 " if rec == n else "") + opt
+            font = self.F["chip"]
+            tw = min(font.measure(label), maxw - p(32))
+            w = tw + p(30)
+            if x > p(PAD) and x + w > Wp - p(PAD):
+                x, y = p(PAD), y + ch + p(8)
+            label = self._ellipsize(label, font, tw + 1)
+            base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if is_fill else self.art.pill(
+                w, ch, outline=(255, 255, 255, 36))
+            hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if is_fill else self.art.pill(
+                w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
+            tag = f"chip{n}"
+            img = c.create_image(x, y, anchor="nw", image=base, tags=("pan", "ask", tag))
+            txt = c.create_text(x + w / 2, y + ch / 2, text=label, font=font,
+                                fill=OBSIDIAN if is_fill else FG, tags=("pan", "ask", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e, o=opt, it=call: self._reply(it, o))
+            c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h),
+                                                                  c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, i=img, b=base: (c.itemconfigure(i, image=b),
+                                                                 c.configure(cursor="")))
+            self._tipify(tag, lambda n=n, o=opt: (f"Press {n + 1} to pick" if n < 9 else o))
+            self.chips.append((img, txt))
+            x += w + p(8)
+        if opts:
+            y += ch + p(12)
+        if chosen and chosen not in opts:
+            t = c.create_text(p(PAD), y, anchor="nw", width=maxw, text=f"Your answer: {chosen}",
+                              font=self.F["meta"], fill=EMBER, tags=("pan", "ask"))
+            self.chips.append((t,))
+            bb = c.bbox(t)
+            y = (bb[3] if bb else y) + p(10)
+        return y
+
+    def _call_review(self, call, decs, d, y):
+        """Every question with its answer; click one to change it, then send them all in one message."""
+        c, p, Wp = self.c, self.p, self.Wp
+        maxw = Wp - 2 * p(PAD)
+        tx = p(PAD) + p(24)
+        for j, dec in enumerate(decs):
+            tag = f"qrev{j}"
+            top = y
+            num = c.create_text(p(PAD), y + p(1), anchor="nw", text=f"{j + 1}", font=self.F["mono"], fill=AMBER,
+                                tags=("pan", "ask", tag))
+            q = c.create_text(tx, y, anchor="nw", width=maxw - p(24) - p(18), text=dec["question"],
+                              font=self.F["meta"], fill=MUTED, tags=("pan", "ask", tag))
+            bb = c.bbox(q)
+            y = (bb[3] if bb else y) + p(3)
+            ans = d["answers"][j]
+            a = c.create_text(tx, y, anchor="nw", width=maxw - p(24) - p(18),
+                              text=ans if ans else "Skipped: the agent decides",
+                              font=self.F["chip"], fill=FG if ans else FAINT, tags=("pan", "ask", tag))
+            bb = c.bbox(a)
+            y = (bb[3] if bb else y)
+            g = c.create_text(Wp - p(PAD), (top + y) / 2, anchor="e", text=self.glyph("right"), font=self.F["icon_s"],
+                              fill=MUTED, tags=("pan", "ask", tag))
+            hit = c.create_rectangle(p(PAD) - p(8), top - p(7), Wp - p(PAD) + p(8), y + p(7), fill=CARD, width=0,
+                                     tags=("pan", "ask", "askhit", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e, j=j: self._goto_question(call, j))
+            c.tag_bind(tag, "<Enter>", lambda e, h=hit, g=g: (c.itemconfigure(h, fill=CARD_HI),
+                                                              c.itemconfigure(g, fill=FG), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, h=hit, g=g: (c.itemconfigure(h, fill=CARD),
+                                                              c.itemconfigure(g, fill=MUTED), c.configure(cursor="")))
+            self._tipify(tag, lambda: "Change this answer")
+            self.chips.append((num, q, a, g, hit))
+            y += p(16)
+            if j < len(decs) - 1:
+                ln = c.create_line(p(PAD), y - p(8), Wp - p(PAD), y - p(8), fill=HAIR, tags=("pan", "ask"))
+                self.chips.append((ln,))
+        y += p(2)
+        bh = p(42)
+        base = self.art.pill(maxw, bh, grad=(AMBER, COOLED))
+        hover = self.art.pill(maxw, bh, grad=(EMBER, AMBER))
+        img = c.create_image(p(PAD), y, anchor="nw", image=base, tags=("pan", "ask", "sendall"))
+        txt = c.create_text(Wp / 2, y + bh / 2, text=f"Send {len(decs)} answers to {call.get('project') or 'the session'}",
+                            font=self.F["chip"], fill=OBSIDIAN, tags=("pan", "ask", "sendall"))
+        c.tag_bind("sendall", "<Button-1>", lambda e: self._send_all(call))
+        c.tag_bind("sendall", "<Enter>", lambda e: (c.itemconfigure(img, image=hover), c.configure(cursor="hand2")))
+        c.tag_bind("sendall", "<Leave>", lambda e: (c.itemconfigure(img, image=base), c.configure(cursor="")))
+        self._tipify("sendall", lambda: "One message with every answer (Enter)")
+        self.chips.append((img, txt))
+        return y + bh + p(4)
 
     def _send_typed(self):
         text = self.entry.get().strip()
@@ -1065,7 +1273,7 @@ class Widget:
         if item and text and text != self._hint:
             self.entry.delete(0, "end")
             self.root.focus_set()
-            self._answer(item, text)
+            self._reply(item, text)
         return "break"
 
     def _entry_focus(self, _e):
@@ -1085,12 +1293,16 @@ class Widget:
         return self.art.pill(self.Wp - 2 * self.p(PAD), self.p(42), fill=Art._rgba(CARD_HI),
                              outline=(245, 158, 11, 150) if focus else (255, 255, 255, 30))
 
-    def _answer(self, item, text):
+    def _answer(self, item, text, answers=None):
         cid = self._call_id(item)
         self.answered.add(cid)
-        self.vq.history.update(cid, answer=text, answered_at=time.time())
+        self._drafts.pop(cid, None)
+        self.vq.history.update(cid, answer=text, answered_at=time.time(),
+                               **({"answers": answers} if answers else {}))
         if self.api.resume_session(self.vq, item, text):
-            self._toast(f"Sent to {item.get('project')}. Its reply will play here")
+            what = f"{len(answers)} answers" if answers else "Sent"
+            self._toast(f"{what} sent to {item.get('project')}. Its reply will play here" if answers
+                        else f"Sent to {item.get('project')}. Its reply will play here")
         else:
             self._copy(text)
             msg = self.api.open_session(item)
@@ -1269,7 +1481,9 @@ class Widget:
         elif self._calls:
             n = len(self._calls)
             name = f"{n} call{'s' if n > 1 else ''} waiting on you"
-            line = f"{self._calls[0].get('project')}: {self._calls[0]['decision']['question']}"
+            decs = decisions_of(self._calls[0])
+            many = f" · {len(decs)} questions" if len(decs) > 1 else ""
+            line = f"{self._calls[0].get('project')}{many}: {decs[0]['question']}"
         else:
             last = self.vq.history.recent(1)
             name = "All caught up"
@@ -1315,7 +1529,7 @@ class Widget:
         lib_rows, lib_sig, bg_count = self._library_rows(q) if self.lib else ([], None, 0)
         key = (playing, body_text, show.get("id") if show else None,
                self._call_id(call) if call else None, self._call_ix, len(self._calls),
-               self.lib, lib_sig, self.mode)
+               self._draft_sig(call), self.lib, lib_sig, self.mode)
         # header (cheap, every tick)
         if show:
             name = show.get("project") or "?"
@@ -1399,48 +1613,38 @@ class Widget:
             for it in (self.call_nav, self.call_prev, self.call_next):
                 c.itemconfigure(it, state=state(many))
             y += p(16)
-            self._text(self.question, call["decision"]["question"])
-            c.coords(self.question, p(PAD), y)
-            bb = c.bbox(self.question)
-            y = (bb[3] if bb else y) + p(12)
-            x = p(PAD)
-            ch = p(36)
-            maxw = Wp - 2 * p(PAD)
-            rec = call["decision"].get("recommended")
-            for n, opt in enumerate(call["decision"]["options"]):
-                is_rec = rec == n
-                label = ("★ " if is_rec else "") + opt
-                font = self.F["chip"]
-                tw = min(font.measure(label), maxw - p(32))
-                w = tw + p(30)
-                if x > p(PAD) and x + w > Wp - p(PAD):
-                    x, y = p(PAD), y + ch + p(8)
-                label = self._ellipsize(label, font, tw + 1)
-                base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if is_rec else self.art.pill(
-                    w, ch, outline=(255, 255, 255, 36))
-                hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if is_rec else self.art.pill(
-                    w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
-                tag = f"chip{n}"
-                img = c.create_image(x, y, anchor="nw", image=base, tags=("pan", "ask", tag))
-                txt = c.create_text(x + w / 2, y + ch / 2, text=label, font=font,
-                                    fill=OBSIDIAN if is_rec else FG, tags=("pan", "ask", tag))
-                c.tag_bind(tag, "<Button-1>", lambda e, o=opt, it=call: self._answer(it, o))
-                c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h),
-                                                                      c.configure(cursor="hand2")))
-                c.tag_bind(tag, "<Leave>", lambda e, i=img, b=base: (c.itemconfigure(i, image=b),
-                                                                     c.configure(cursor="")))
-                self._tipify(tag, lambda n=n, o=opt: (f"Press {n + 1} to pick" if n < 9 else o))
-                self.chips.append((img, txt))
-                x += w + p(8)
-            y += ch + p(12)
-            c.itemconfigure(self.entry_bg, image=self._entry_img(self.root.focus_get() is self.entry))
-            c.coords(self.entry_bg, p(PAD), y)
-            c.coords(self.entry_win, p(PAD) + p(18), y + p(21))
-            c.coords(self.send_bg, Wp - p(PAD) - p(5) - p(16), y + p(21))
-            c.coords(self.send_g, Wp - p(PAD) - p(5) - p(16), y + p(21))
-            y += p(42) + p(4)
+            decs, d = self._draft(call)
+            n, ix = len(decs), d["ix"]
+            review = n > 1 and ix >= n
+            if n > 1:
+                y = self._call_steps(call, decs, d, y)
+            if review:
+                y = self._call_review(call, decs, d, y)
+                c.itemconfigure(self.question, state="hidden")
+            else:
+                dec = decs[ix]
+                self._text(self.question, dec["question"])
+                c.coords(self.question, p(PAD), y)
+                bb = c.bbox(self.question)
+                y = (bb[3] if bb else y) + p(12)
+                y = self._call_chips(call, dec, d["answers"][ix] if d["done"][ix] else None, y)
+                self._set_hint("Type your answer" if not dec["options"] else
+                               ("Another answer, or ask a follow-up" if n > 1 else "Another option, or ask a follow-up"))
+                c.itemconfigure(self.entry_bg, image=self._entry_img(self.root.focus_get() is self.entry))
+                c.coords(self.entry_bg, p(PAD), y)
+                c.coords(self.entry_win, p(PAD) + p(18), y + p(21))
+                c.coords(self.send_bg, Wp - p(PAD) - p(5) - p(16), y + p(21))
+                c.coords(self.send_g, Wp - p(PAD) - p(5) - p(16), y + p(21))
+                y += p(42) + p(4)
             c.tag_raise("ask")
         c.itemconfigure("ask", state=state(bool(call)))
+        if call:
+            decs, d = self._draft(call)
+            in_review = len(decs) > 1 and d["ix"] >= len(decs)
+            for i in (self.entry_bg, self.entry_win, self.send_bg, self.send_g):
+                c.itemconfigure(i, state="hidden" if in_review else "normal")
+            c.itemconfigure(self.question, state="hidden" if in_review else "normal")
+            c.tag_lower("askhit", self.glow_cap)
         if call and len(self._calls) < 2:
             for it in (self.call_nav, self.call_prev, self.call_next):
                 c.itemconfigure(it, state="hidden")
@@ -1856,9 +2060,13 @@ class Widget:
         if it.get("session_id"):
             links.append(("Copy resume", lambda: self._copy(self._resume_cmd(it), "Resume command copied")))
         if it.get("answer"):
-            l.create_text(p(12), y, anchor="nw", text=f"You answered: {it['answer']}", font=self.F["snip"],
-                          fill=EMBER, width=w - p(24))
-            y += p(20)
+            answers = it.get("answers")
+            text = ("You answered:\n" + "\n".join(f"{n}. {a or 'Skipped (the agent decides)'}"
+                                                   for n, a in enumerate(answers, 1))
+                    if answers else f"You answered: {it['answer']}")
+            t3 = l.create_text(p(12), y, anchor="nw", text=text, font=self.F["snip"], fill=EMBER, width=w - p(24))
+            bb = l.bbox(t3)
+            y = (bb[3] if bb else y + p(14)) + p(8)
         for i, (text, fn) in enumerate(links):
             tag = f"lnk{it['id']}{i}"
             item = l.create_text(x, y, anchor="nw", text=text, font=self.F["link"], fill=AMBER, tags=(tag,))

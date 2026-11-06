@@ -252,8 +252,35 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(d["decision"]["options"], ["Nightly to Mac", "NAS only"])
         self.assertEqual(d["decision"]["recommended"], 0)
         self.assertIsNone(voiced.parse_summary("no json"))
-        bad = voiced.parse_summary('{"summary": "ok", "decision": {"question": "q", "options": ["one"], "recommended": 5}}')
-        self.assertIsNone(bad["decision"])
+        one = voiced.parse_summary('{"summary": "ok", "decision": {"question": "q", "options": ["one"], "recommended": 5}}')
+        self.assertEqual(one["decision"], {"question": "q", "options": [], "recommended": None})  # open question
+        none = voiced.parse_summary('{"summary": "ok", "decisions": []}')
+        self.assertIsNone(none["decision"])
+        self.assertEqual(none["decisions"], [])
+
+    def test_parse_several_questions(self):
+        raw = ('{"speak": true, "summary": "Three things need you.", "decisions": ['
+               '{"question": "Which backup?", "options": ["Nightly", "NAS only"], "recommended": 0},'
+               '{"question": "What should the bucket be called?", "options": []},'
+               '{"question": "Ship today?", "options": ["Yes", "No", "After review"], "recommended": 2},'
+               '{"question": "", "options": ["x", "y"]}]}')
+        d = voiced.parse_summary(raw)
+        self.assertEqual([x["question"] for x in d["decisions"]],
+                         ["Which backup?", "What should the bucket be called?", "Ship today?"])
+        self.assertEqual(d["decision"]["question"], "Which backup?")
+        self.assertEqual(d["decisions"][1]["options"], [])
+        self.assertEqual(d["decisions"][2]["recommended"], 2)
+
+    def test_combined_answer(self):
+        decs = [{"question": "Which backup?", "options": ["Nightly", "NAS"]}, {"question": "Name?", "options": []},
+                {"question": "Ship?", "options": ["Yes", "No"]}]
+        msg = voiced.combined_answer(decs, ["Nightly", None, "Yes"])
+        self.assertIn("1. Which backup?\n   Answer: Nightly", msg)
+        self.assertIn("2. Name?\n   Answer: " + voiced.SKIPPED, msg)
+        self.assertIn("3. Ship?\n   Answer: Yes", msg)
+        self.assertEqual(voiced.combined_answer(decs[:1], ["NAS"]), "NAS")
+        self.assertEqual(voiced.decisions_of({"decision": decs[0]}), decs[:1])
+        self.assertEqual(voiced.decisions_of({"decisions": decs, "decision": decs[0]}), decs)
 
 
 class SummaryQueueTests(unittest.TestCase):
@@ -293,6 +320,7 @@ class SummaryQueueTests(unittest.TestCase):
         it = self.vq.say("x", cwd="C:/a", message="Should I merge?", entrypoint="cli")
         self.assertTrue(wait(lambda: (self.h.get(it["id"]) or {}).get("decision") is not None))
         self.assertEqual(self.h.get(it["id"])["decision"]["options"], ["Yes", "No"])
+        self.assertEqual(len(self.h.get(it["id"])["decisions"]), 1)
 
     def test_burst_from_one_folder_is_grouped(self):
         self.vq.pause()
