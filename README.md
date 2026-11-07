@@ -426,8 +426,10 @@ The Stop hook no longer plays audio itself. It posts each reply to one local dae
 
 - turns each reply into a short spoken summary (`claude -p --model haiku`, hooks off): what was done and what
   you need to do, never code or JSON. `--raw` or `VOICED_SUMMARY=0` speaks a cleaned-up excerpt instead
-- speaks one reply at a time, so parallel sessions never talk over each other. Replies that need a decision
-  play before plain status updates; a burst of 3+ from one folder is spoken once with a count
+- speaks one reply at a time, so parallel sessions never talk over each other. A newer reply from a thread
+  replaces that thread's older unspoken ones, and replies from different threads are never merged (only
+  background runs are), so every call answers back to the thread that asked it. Replies that need a decision
+  play before plain status updates; a burst of 3+ background runs from one folder is spoken once with a count
 - records headless runs (`claude -p`, SDK, batch prompts) in history without speaking them
   (`--speak-headless` or `VOICED_SPEAK_HEADLESS=1` to speak them too)
 - keeps history as text in `%LOCALAPPDATA%\local-tts\history.jsonl` (7 days; replays are synthesized again)
@@ -443,7 +445,20 @@ reply is speaking. Three sizes:
   decision from the last 24 hours across all projects, newest first (arrows step through them). Pick an
   option (or press 1-9), or type another option or a follow-up and press Enter: it is sent to that session
   with `claude --resume <id> -p` in the background, and the session's reply plays here. A call disappears
-  once you answer it, dismiss it, or the session replies again (you answered it there)
+  once you answer it, dismiss it, or the session replies again (you answered it there).
+  When one reply asks several questions they stay together as one call ("Question 1 of 3"): answer or skip
+  (S) each one, check them on the review step (click a row to change it), then **Send answers** (Enter)
+  delivers them to the session in one message. Nothing is sent until then, so the agent never acts on half
+  the answers.
+  Under each question, "About:" opens the context: a sentence or two on what the question refers to,
+  any pictures the reply points at (click to open), links to previews, and the full reply, so there's no
+  need to open the session first.
+  Where the answer goes: a reply from a thread open in the **Claude desktop app** is answered in that thread.
+  The player opens it, checks the header shows that thread's title, and types and sends the answer through
+  Windows UI Automation. If the input box already holds a draft, or the thread can't be found, nothing is typed:
+  the answer is copied and the call stays open. Other sessions (terminal, VS Code) are resumed in the background
+  with `claude --resume <id> -p`. A background resume is invisible in an open desktop thread, which then goes
+  out of date, so use "Background" only on purpose
 - **Library** (Queue & history): up next and the last 7 days. Click a row for the full text, Replay,
   Open session, Answer and Copy resume. Background runs are counted, not listed
 
@@ -465,13 +480,15 @@ The gear button opens Settings. Changes apply at once and are saved to
 | Say which project first | on/off | on |
 | Summarize replies (off reads a cleaned-up excerpt) | on/off | on |
 | Speak background runs | on/off | off |
+| Pulse with the voice (rim and orb follow the voice's loudness; off: slow breath) | on/off | on |
 | Open the panel when a call arrives | on/off | on |
 | Hide when nothing is playing | on/off | off |
 | Keep calls waiting for | 6h, 12h, 1 day, 3 days | 1 day |
+| Answers to Claude app threads | Type and send, Paste only, Background | Type and send |
 
 "Restore defaults" and "Reset position" are at the bottom. Scripts can read and change the same values:
 `GET /settings`, and `POST /settings` with a JSON object of the keys to change (unknown keys and values are
-refused). To add a setting, add it to `SETTINGS_SCHEMA` in `voiced.py` and a control in
+ignored). To add a setting, add it to `SETTINGS_SCHEMA` in `voiced.py` and a control in
 `Widget._settings_panel` in `player.py`.
 
 It is light: one canvas, no widget per row, and animations run only while something moves (about 1% of a

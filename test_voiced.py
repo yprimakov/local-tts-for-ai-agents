@@ -253,7 +253,7 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(d["decision"]["recommended"], 0)
         self.assertIsNone(voiced.parse_summary("no json"))
         one = voiced.parse_summary('{"summary": "ok", "decision": {"question": "q", "options": ["one"], "recommended": 5}}')
-        self.assertEqual(one["decision"], {"question": "q", "options": [], "recommended": None})  # open question
+        self.assertEqual(one["decision"], {"question": "q", "options": [], "context": "", "recommended": None})  # open
         none = voiced.parse_summary('{"summary": "ok", "decisions": []}')
         self.assertIsNone(none["decision"])
         self.assertEqual(none["decisions"], [])
@@ -335,14 +335,83 @@ class SummaryQueueTests(unittest.TestCase):
 
     def test_burst_from_one_folder_is_grouped(self):
         self.vq.pause()
+        self.vq.speak_headless = True
         for i in range(8):
-            self.vq.say("x", cwd="C:/p/_timelog", session_id=f"s{i}", message=f"Run {i} done", entrypoint="cli")
+            self.vq.say("x", cwd="C:/p/_timelog", session_id=f"s{i}", message=f"Run {i} done", entrypoint="sdk-cli")
         self.assertEqual(len(self.vq.state()["queue"]), 3)
         last = self.vq.state()["queue"][-1]
         self.assertEqual(last["group_count"], 6)
         self.vq.resume()
         self.assertTrue(wait(lambda: len(FakePlayer.log) == 3, 5))
         self.assertIn("6 replies", FakePlayer.log[-1])
+
+    def test_two_threads_in_one_folder_never_group(self):
+        """Grouping across sessions sent an answer to the wrong thread: each live thread keeps its own item."""
+        self.vq.pause()
+        for i in range(6):
+            self.vq.say("x", cwd="C:/job-seeker", session_id=f"thread{i % 2}", message=f"Reply {i}?",
+                        entrypoint="claude-desktop")
+        q = self.vq.state()["queue"]
+        self.assertEqual(len(q), 2)  # the newest reply of each thread
+        self.assertEqual(sorted(self.h.get(i["id"])["message"] for i in q), ["Reply 4?", "Reply 5?"])
+        self.assertTrue(all(i.get("group_count", 1) == 1 for i in q))
+        self.assertTrue(wait(lambda: all((self.h.get(i["id"]) or {}).get("decision") for i in q)))
+        for i in q:  # every call answers back to the session that asked it
+            self.assertIn(i["session_id"], ("thread0", "thread1"))
+            self.assertEqual(self.h.get(i["id"])["session_id"], i["session_id"])
+
+    def test_newer_reply_replaces_older_from_same_thread(self):
+        self.vq.pause()
+        a = self.vq.say("x", cwd="C:/g", session_id="T", message="Old status?", entrypoint="claude-desktop")
+        b = self.vq.say("x", cwd="C:/g", session_id="U", message="Other thread", entrypoint="claude-desktop")
+        c = self.vq.say("x", cwd="C:/g", session_id="T", message="Four questions?", entrypoint="claude-desktop")
+        ids = [i["id"] for i in self.vq.state()["queue"]]
+        self.assertNotIn(a["id"], ids)
+        self.assertIn(b["id"], ids)
+        self.assertIn(c["id"], ids)
+        self.assertEqual(self.h.get(a["id"])["status"], "not spoken: newer reply")
+        self.assertEqual(c.get("group_count", 1), 1)
+
+    def test_stale_summary_is_dropped(self):
+        """A summary of an older message never lands on an item whose message (and session) moved on."""
+        gate = threading.Event()
+
+        def slow(item):
+            if item["message"].startswith("old"):
+                gate.wait(2)
+            return {"speak": True, "summary": "Summary of " + item["message"][:6], "decision": None, "decisions": []}
+        self.vq.stop()
+        h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
+        vq = voiced.VoiceQueue(h, fake_synth, FakePlayer, summarizer=slow)
+        threading.Thread(target=vq.summarize_loop, daemon=True).start()
+        vq.pause()
+        it = vq.say("x", cwd="C:/a", session_id="A", message="old reply", entrypoint="cli")
+        time.sleep(0.2)  # the old summary is running
+        with vq._cv:
+            it.update(message="new reply", session_id="A2")
+            vq._todo.append(it)
+            vq._cv.notify_all()
+        gate.set()
+        self.assertTrue(wait(lambda: it.get("text") == "Summary of new re", 3))
+        vq.stop()
+
+    def test_loudness_envelope(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy not installed")
+        import wave
+        sr = 24000
+        t = np.arange(sr) / sr
+        x = np.concatenate([np.zeros(sr // 2), 0.5 * np.sin(2 * np.pi * 220 * t[: sr // 2])])
+        path = Path(tempfile.mkdtemp()) / "e.wav"
+        with wave.open(str(path), "w") as wf:
+            wf.setnchannels(1), wf.setsampwidth(2), wf.setframerate(sr)
+            wf.writeframes((x * 32767).astype(np.int16).tobytes())
+        env = voiced.loudness_envelope(str(path))
+        self.assertEqual(len(env), 25)  # one second at 25 frames per second
+        self.assertLess(max(env[:10]), 0.05)
+        self.assertGreater(min(env[15:]), 0.9)
 
     def test_headless_flag_from_hook(self):
         it = self.vq.say("x", cwd="C:/a", message="hi there friend", entrypoint="claude-desktop", headless=True)

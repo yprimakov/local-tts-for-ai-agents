@@ -68,6 +68,7 @@ SETTINGS_SCHEMA = {
     # answers to a session open in the Claude app: type them into its thread and send, paste only, or the old
     # background `claude --resume -p` (invisible in the app's thread, which then goes out of date)
     "desktop_answers": (["send", "paste", "background"], "send"),
+    "pulse_with_voice": (bool, True),  # the rim and orb follow the voice's loudness instead of a slow breath
 }
 
 
@@ -207,7 +208,7 @@ Yury hears it through a speaker while doing something else. It must save him tim
 Write JSON only, no prose around it, with exactly these keys:
 {{"speak": true or false,
   "summary": "1 to 3 short spoken sentences",
-  "decisions": [{{"question": "...", "options": ["...", "..."], "recommended": index or null}}, ...]}}
+  "decisions": [{{"question": "...", "context": "...", "options": ["...", "..."], "recommended": index or null}}, ...]}}
 
 summary: plain conversational English, like a colleague giving a quick update. Say what was done
 and what, if anything, Yury needs to do. No code, JSON, markup, file paths, URLs, IDs, hashes,
@@ -217,6 +218,8 @@ most 6; an empty list when it asks nothing. Count each numbered or bulleted ques
 keep closely tied ones apart only when they need different answers. question: one short spoken-style
 sentence. options: 2 to 4 short choices (at most 6 words each) when the reply offers or implies them,
 or an empty list for an open question. recommended: index of the option the agent recommends, or null.
+context: 1 or 2 short sentences so Yury can answer without opening the session: what the question is
+about, what led to it, and what each choice changes when that is not obvious. Same plain style.
 speak: false when the reply is machine output (raw JSON, logs, data dumps) or routine noise with
 nothing worth hearing; then summary is one short sentence saying what kind of output it was.
 
@@ -261,9 +264,40 @@ def parse_summary(raw: str) -> dict | None:
             opts = []  # one option is not a choice: answer it in words
         rec = dec.get("recommended")
         decs.append({"question": str(dec["question"]).strip()[:240], "options": opts,
+                     "context": plain_speech(str(dec.get("context") or "")) if dec.get("context") else "",
                      "recommended": rec if opts and isinstance(rec, int) and 0 <= rec < len(opts) else None})
     out["decisions"] = decs[:6]
     out["decision"] = decs[0] if decs else None  # kept for older readers: truthy means "needs Yury"
+    return out
+
+
+_IMG_EXT = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+
+
+def find_visuals(message: str, cwd: str = "", limit: int = 4) -> list[dict]:
+    """Pictures and previews a reply points at (screenshots, rendered frames, artifact pages), so a call
+    can show them next to the question. Local images must exist; links are http(s) only."""
+    out, seen = [], set()
+    for m in re.finditer(r"!?\[([^\]]*)\]\(([^)\s]+)\)|(?<![\w/])([A-Za-z]:[\\/][^\s`'\"<>|]+|(?:\.{0,2}/)?(?:[\w.-]+/)+[\w.-]+)", message or ""):
+        label, target = (m.group(1) or ""), (m.group(2) or m.group(3) or "").strip(".,;:")
+        if not target or target in seen:
+            continue
+        if target.lower().startswith(("http://", "https://")):
+            if target.lower().split("?")[0].endswith(_IMG_EXT) or "claude.ai/" in target or label:
+                seen.add(target)
+                out.append({"kind": "link", "url": target, "label": label.strip() or
+                            ("Open the preview" if "artifact" in target else target.split("//", 1)[-1].split("/")[0])})
+        elif target.lower().endswith(_IMG_EXT):
+            p = Path(target) if Path(target).is_absolute() or not cwd else Path(cwd) / target
+            try:
+                ok = p.is_file()
+            except OSError:
+                ok = False
+            if ok:
+                seen.add(target)
+                out.append({"kind": "image", "path": str(p), "label": label.strip() or p.name})
+        if len(out) >= limit:
+            break
     return out
 
 
@@ -425,6 +459,10 @@ class VoiceQueue:
         item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": text.strip(), "cwd": cwd,
                 "session_id": session_id, "entrypoint": entrypoint, **src, "status": "queued",
                 "message": message[:8000], "host": host or {}}
+        try:
+            item["visuals"] = find_visuals(message, cwd)
+        except Exception as e:  # cosmetic
+            log(f"visuals: {e!r}")
         if not self.summarizer:  # no model: never read code or JSON aloud
             item["text"] = plain_speech(message) or (text.strip() if not looks_machine(text) else "")
             if not item["text"]:
@@ -440,7 +478,17 @@ class VoiceQueue:
             self.history.add(item)
             return item
         with self._cv:
-            same = [i for i in self.queue if i.get("cwd") == cwd and not i.get("replay_of")]
+            # a newer reply from the same thread replaces its older unspoken ones: the queue stays current,
+            # and the newest reply (with all of its questions) is the one that becomes the call
+            if session_id:
+                for old in [i for i in self.queue if i.get("session_id") == session_id and not i.get("replay_of")]:
+                    self.queue.remove(old)
+                    old["status"] = "not spoken: newer reply"
+                    self.history.update(old["id"], status=old["status"])
+            # only background runs are grouped (batch jobs). Merging live threads' replies sent an answer to the
+            # wrong thread, and hid a four-question call inside an old item
+            same = [i for i in self.queue if i.get("cwd") == cwd and not i.get("replay_of")
+                    and i.get("headless") and src["headless"]]
             if len(same) >= self.GROUP_AFTER:
                 last = same[-1]  # a burst from one folder (batch jobs): speak it once, with a count
                 last["group_count"] = last.get("group_count", 1) + 1
@@ -471,12 +519,15 @@ class VoiceQueue:
                 if self._stop:
                     return
                 item = self._todo.popleft()
+                asked = (item.get("message"), item.get("session_id"))
             out = None
             try:
                 out = self._summarizer(item)
             except Exception as e:
                 log(f"summary error: {e!r}")
             with self._cv:
+                if (item.get("message"), item.get("session_id")) != asked:
+                    continue  # a newer reply joined while this ran: it is queued again, and its summary wins
                 if out:
                     item["text"], item["decision"] = out["summary"], out.get("decision")
                     item["decisions"] = out.get("decisions") or ([out["decision"]] if out.get("decision") else [])
@@ -618,10 +669,15 @@ class VoiceQueue:
                 if self._skip.is_set():
                     status = "skipped"
                 else:
+                    try:
+                        env = loudness_envelope(wav)
+                    except Exception as e:  # cosmetic: never stop speaking over it
+                        log(f"envelope: {e!r}")
+                        env = []
                     player = self.make_player(wav)
                     with self._cv:
                         self._player = player
-                        self.current["status"] = "playing"
+                        self.current.update(status="playing", env=env, env_fps=ENV_FPS)
                         if not self.paused:
                             player.play()
                     while not self._stop:
@@ -641,6 +697,29 @@ class VoiceQueue:
                 self._player, self.current = None, None
             if not item.get("replay_of"):
                 self.history.update(item["id"], status=status, spoken_at=time.time())
+
+
+ENV_FPS = 25  # loudness frames per second (the player draws at 25 fps while speaking)
+
+
+def loudness_envelope(wav: str, fps: int = ENV_FPS) -> list[float]:
+    """Loudness of a WAV, one value 0..1 per frame, so the player's rim can pulse with the voice."""
+    import wave
+    import numpy as np
+    with wave.open(wav, "rb") as wf:
+        sr, n, width = wf.getframerate(), wf.getnframes(), wf.getsampwidth()
+        raw = wf.readframes(n)
+    if width != 2 or not n:
+        return []
+    x = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    hop = max(1, sr // fps)
+    frames = len(x) // hop
+    if frames == 0:
+        return []
+    rms = np.sqrt(np.mean(x[: frames * hop].reshape(frames, hop) ** 2, axis=1))
+    ref = float(np.percentile(rms, 95)) or 1.0
+    env = np.clip(rms / ref, 0.0, 1.0) ** 0.7  # lift quiet syllables a little
+    return [round(float(v), 2) for v in env]
 
 
 # ---------------------------------------------------------------- Kokoro (loaded once)
@@ -858,14 +937,13 @@ $A = [System.Windows.Automation.AutomationElement]; $D = [System.Windows.Automat
 function Cond($v) { New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, $v) }
 function Norm($t) { ($t -replace '\s+', ' ').Trim() }
 $title = $env:VQ_TITLE; $prompt = $null; $until = (Get-Date).AddSeconds(10)
+if (-not $title) { exit 4 }  # never type without proof that the right thread is showing
 while ((Get-Date) -lt $until -and -not $prompt) {
   $p = Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.Path -notlike '*claude-code*' } | Select-Object -First 1
   if ($p) {
-    $root = $A::FromHandle($p.MainWindowHandle); $top = $root.Current.BoundingRectangle.Top; $here = -not $title
-    if ($title) {
-      foreach ($h in $root.FindAll($D, (Cond $title))) {
-        if ($h.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and $h.Current.BoundingRectangle.Top -lt $top + 80) { $here = $true }
-      }
+    $root = $A::FromHandle($p.MainWindowHandle); $top = $root.Current.BoundingRectangle.Top; $here = $false
+    foreach ($h in $root.FindAll($D, (Cond $title))) {
+      if ($h.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and $h.Current.BoundingRectangle.Top -lt $top + 80) { $here = $true }
     }
     if ($here) { $prompt = $root.FindFirst($D, (Cond 'Prompt')) }
   }
@@ -877,6 +955,11 @@ if ((Norm $tp.DocumentRange.GetText(200))) { exit 3 }
 $old = $null; try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $old = [System.Windows.Forms.Clipboard]::GetText() } } catch {}
 [System.Windows.Forms.Clipboard]::SetText($env:VQ_TEXT)
 $prompt.SetFocus(); Start-Sleep -Milliseconds 250
+$f = $A::FocusedElement
+if (-not $f -or -not [System.Windows.Automation.Automation]::Compare($f, $prompt)) {
+  if ($old) { try { [System.Windows.Forms.Clipboard]::SetText($old) } catch {} }
+  exit 5  # keys would go somewhere else
+}
 [System.Windows.Forms.SendKeys]::SendWait('^v'); Start-Sleep -Milliseconds 500
 $want = Norm $env:VQ_TEXT; $got = Norm $tp.DocumentRange.GetText(100000)
 $code = 0

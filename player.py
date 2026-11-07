@@ -18,6 +18,7 @@ Three sizes:
 from __future__ import annotations
 
 import math
+import re
 import sys
 import threading
 import time
@@ -279,7 +280,8 @@ class MemSettings:
         self.version = 0
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
                    "say_source": True, "speak_background": False, "auto_open_calls": True,
-                   "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send"}
+                   "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send",
+                   "pulse_with_voice": True}
 
     def get(self, k):
         return self._v[k]
@@ -343,6 +345,7 @@ class Widget:
         self.answered: set[str] = set()
         self._drafts: dict[str, dict] = {}  # call id -> answers so far, sent together once all are in
         self._typed: list[tuple] = []        # results from typing answers into the Claude app (worker thread)
+        self._thumbs: dict = {}              # thumbnails for call context, by (path, w, h)
         self._call_ix = 0
         self._auto_open = None      # call id that opened the panel by itself
         self._calls: list[dict] = []
@@ -351,6 +354,7 @@ class Widget:
         self._paused = False
         self._shown = None
         self._prog = (0.0, 0.0, 0.0, False)  # pos, dur, wall clock, running
+        self._env_k = 0.0                       # smoothed voice loudness for the pulse
         self._scrub = None
         self._level = -1
         self._anims: dict = {}
@@ -614,6 +618,11 @@ class Widget:
                               highlightthickness=0, font=self.F["entry"])
         self.entry_win = c.create_window(p(PAD) + p(16), 0, anchor="w", window=self.entry,
                                          width=self.Wp - 2 * p(PAD) - p(16) - p(48), tags=("pan", "ask"))
+        self.ctx_text = tk.Text(c, bg=CARD_HI, fg=BODY, relief="flat", bd=0, highlightthickness=0, wrap="word",
+                                font=self.F["snip"], padx=0, pady=0, cursor="arrow", insertwidth=0,
+                                selectbackground=BRONZE, spacing1=0, spacing3=self.p(4))
+        self.ctx_win = c.create_window(0, 0, anchor="nw", window=self.ctx_text, tags=("pan", "ask"))
+        self._ctx_shown = False
         self._hint = "Another option, or ask a follow-up"
         self.entry.insert(0, self._hint)
         self.entry.bind("<FocusIn>", self._entry_focus)
@@ -965,8 +974,15 @@ class Widget:
             if self._scrub is not None:
                 frac = self._scrub
             self._draw_progress(frac, dur)
-        # breathing ember: orb glow and the card's rim
-        if speaking:
+        # ember: orb glow and the card's rim pulse with the voice (or breathe slowly)
+        env = (self._cur or {}).get("env") if speaking and self.cfg.get("pulse_with_voice") else None
+        if env and dur:
+            i = int((pos + (time.time() - wall)) * ((self._cur or {}).get("env_fps") or 25))
+            target = 0.1 + 0.9 * (env[i] if 0 <= i < len(env) else 0.0)
+            # quick attack, gentler release: reads as a pulse on each syllable, not flicker
+            self._env_k += (target - self._env_k) * (0.65 if target > self._env_k else 0.2)
+            lvl = round(self._env_k * (LEVELS - 1))
+        elif speaking:
             phase = (now % BREATH) / BREATH
             lvl = round((0.5 - 0.5 * math.cos(2 * math.pi * phase)) * (LEVELS - 1))
         else:
@@ -1098,7 +1114,7 @@ class Widget:
         if not call:
             return None
         _, d = self._draft(call)
-        return d["ix"], tuple(d["answers"]), tuple(d["done"])
+        return d["ix"], tuple(d["answers"]), tuple(d["done"]), d.get("ctx", False), d.get("full", False)
 
     def _reply(self, call, text):
         """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
@@ -1177,6 +1193,151 @@ class Widget:
             self._tipify(tag, lambda j=j: decs[j]["question"])
             self.chips.append((hit, ln))
         return y + p(18)
+
+    def _ctx_toggle(self, call, key):
+        _, d = self._draft(call)
+        d[key] = not d.get(key, False)
+        if key == "ctx" and not d["ctx"]:
+            d["full"] = False
+        self._layout_key = None
+        self._tick_once()
+
+    def _thumb(self, path, w, h):
+        """A cover-cropped thumbnail of a picture the reply points at (cached)."""
+        key = (path, w, h)
+        if key not in self._thumbs:
+            from PIL import Image, ImageDraw, ImageTk
+            im = Image.open(path).convert("RGB")
+            s = max(w / im.width, h / im.height)
+            im = im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))), Image.LANCZOS)
+            l, t = (im.width - w) // 2, (im.height - h) // 2
+            im = im.crop((l, t, l + w, t + h)).convert("RGBA")
+            mask = Image.new("L", (w * 4, h * 4), 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, w * 4 - 1, h * 4 - 1), radius=self.p(10) * 4, fill=255)
+            im.putalpha(mask.resize((w, h), Image.LANCZOS))
+            bg = Image.new("RGBA", (w, h), Art._rgba(CARD_HI))
+            self._thumbs[key] = ImageTk.PhotoImage(Image.alpha_composite(bg, im))
+        return self._thumbs[key]
+
+    @staticmethod
+    def _reply_text(message):
+        t = re.sub(r"\*\*|__|`", "", message or "")
+        t = re.sub(r"!?\[([^\]]*)\]\(([^)]*)\)", r"\1", t)
+        return re.sub(r"\n{3,}", "\n\n", t).strip()
+
+    def _open_path(self, target):
+        try:
+            if sys.platform == "win32":
+                import os
+                os.startfile(target)
+            else:
+                import webbrowser
+                webbrowser.open(target)
+        except OSError as e:
+            self._toast(f"Couldn't open it: {e.strerror or e}")
+
+    def _call_context(self, call, dec, d, y):
+        """What the question is about: a one-line hint that opens to the context, any pictures or previews
+        the reply points at, and the full reply, so there's no need to open the session first."""
+        c, p, Wp = self.c, self.p, self.Wp
+        row = self.vq.history.get(self._call_id(call)) or {}
+        ctx = (dec.get("context") or "").strip()
+        vis = call.get("visuals") or row.get("visuals") or []
+        msg = row.get("message") or call.get("message") or ""
+        if not (ctx or vis or msg):
+            return y
+        x0, x1 = p(PAD), Wp - p(PAD)
+        opened = d.get("ctx", False)
+        # the toggle row
+        g = c.create_text(x0, y + p(8), anchor="w", text=self.glyph("down" if opened else "right"),
+                          font=self.F["icon_s"], fill=MUTED, tags=("pan", "ask", "ctxtog"))
+        hint = ctx if ctx else ("Pictures and the full reply" if vis else "The full reply")
+        lead = "Hide context" if opened else "About: "
+        t1 = c.create_text(x0 + p(16), y + p(8), anchor="w", text=lead, font=self.F["mono"], fill=EMBER,
+                           tags=("pan", "ask", "ctxtog"))
+        items = [g, t1]
+        if not opened:
+            lw = self.F["mono"].measure(lead)
+            t2 = c.create_text(x0 + p(16) + lw, y + p(8), anchor="w",
+                               text=self._ellipsize(hint, self.F["meta"], x1 - x0 - p(16) - lw),
+                               font=self.F["meta"], fill=MUTED, tags=("pan", "ask", "ctxtog"))
+            items.append(t2)
+        hit = c.create_rectangle(x0 - p(4), y - p(2), x1, y + p(18), fill=CARD, width=0,
+                                 tags=("pan", "ask", "askhit", "ctxtog"))
+        items.append(hit)
+        c.tag_bind("ctxtog", "<Button-1>", lambda e: self._ctx_toggle(call, "ctx"))
+        c.tag_bind("ctxtog", "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure(g, fill=FG)))
+        c.tag_bind("ctxtog", "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure(g, fill=MUTED)))
+        self.chips.append(tuple(items))
+        y += p(26)
+        if not opened:
+            return y + p(2)
+        # the panel
+        top = y
+        pad = p(14)
+        ix0, ix1 = x0 + pad, x1 - pad
+        y += pad
+        if ctx:
+            t = c.create_text(ix0, y, anchor="nw", text=ctx, font=self.F["snip"], fill=BODY, width=ix1 - ix0,
+                              tags=("pan", "ask"))
+            self.chips.append((t,))
+            bb = c.bbox(t)
+            y = (bb[3] if bb else y) + p(12)
+        imgs = [v for v in vis if v.get("kind") == "image"][:2]
+        if imgs:
+            gap = p(8)
+            w = int(((ix1 - ix0) - gap * (len(imgs) - 1)) / len(imgs))
+            h = p(110) if len(imgs) == 1 else p(84)
+            for n, v in enumerate(imgs):
+                try:
+                    ph = self._thumb(v["path"], w, h)
+                except Exception as e:  # a missing or odd file never breaks the panel
+                    self.api.log(f"thumb {v.get('path')}: {e!r}")
+                    continue
+                tag = f"ctximg{n}"
+                im = c.create_image(ix0 + n * (w + gap), y, anchor="nw", image=ph, tags=("pan", "ask", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e, pth=v["path"]: self._open_path(pth))
+                c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+                c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+                self._tipify(tag, lambda v=v: f"Open {v.get('label') or 'the picture'}")
+                self.chips.append((im,))
+            y += h + p(12)
+        links = [v for v in vis if v.get("kind") == "link"][:3]
+        lx = ix0
+        actions = [(v.get("label") or "Open", lambda u=v["url"]: self._open_path(u)) for v in links]
+        if msg:
+            actions.append(("Hide the full reply" if d.get("full") else "Read the full reply",
+                            lambda: self._ctx_toggle(call, "full")))
+        for n, (label, fn) in enumerate(actions):
+            text = label + (" \u2197" if n < len(links) else "")
+            tw = self.F["link"].measure(text)
+            if lx > ix0 and lx + tw > ix1:
+                lx, y = ix0, y + p(22)
+            tag = f"ctxlnk{n}"
+            t = c.create_text(lx, y, anchor="nw", text=text, font=self.F["link"], fill=AMBER, tags=("pan", "ask", tag))
+            c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
+            c.tag_bind(tag, "<Enter>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=AMBER), c.configure(cursor="")))
+            self.chips.append((t,))
+            lx += tw + p(18)
+        if actions:
+            y += p(22)
+        if d.get("full") and msg:
+            self.ctx_text.configure(state="normal")
+            self.ctx_text.delete("1.0", "end")
+            self.ctx_text.insert("1.0", self._reply_text(msg))
+            self.ctx_text.configure(state="disabled")
+            self.ctx_text.yview_moveto(0)
+            h = p(190)
+            c.coords(self.ctx_win, ix0, y + p(2))
+            c.itemconfigure(self.ctx_win, width=ix1 - ix0, height=h)
+            self._ctx_shown = True
+            y += h + p(10)
+        y += pad - p(6)
+        box = c.create_rectangle(x0, top, x1, y, fill=CARD_HI, outline=HAIR, width=1,
+                                 tags=("pan", "ask", "askhit"))
+        self.chips.append((box,))
+        return y + p(14)
 
     def _call_chips(self, call, dec, chosen, y):
         """Option pills. The chosen answer (or else the recommendation) is filled; the recommendation has a star."""
@@ -1620,6 +1781,7 @@ class Widget:
         c.itemconfigure("play", state=state(playing))
 
         # calls
+        self._ctx_shown = False
         for ids in self.chips:
             for i in ids:
                 c.delete(i)
@@ -1659,7 +1821,8 @@ class Widget:
                 self._text(self.question, dec["question"])
                 c.coords(self.question, p(PAD), y)
                 bb = c.bbox(self.question)
-                y = (bb[3] if bb else y) + p(12)
+                y = (bb[3] if bb else y) + p(10)
+                y = self._call_context(call, dec, d, y)
                 y = self._call_chips(call, dec, d["answers"][ix] if d["done"][ix] else None, y)
                 self._set_hint("Type your answer" if not dec["options"] else
                                ("Another answer, or ask a follow-up" if n > 1 else "Another option, or ask a follow-up"))
@@ -1678,6 +1841,7 @@ class Widget:
                 c.itemconfigure(i, state="hidden" if in_review else "normal")
             c.itemconfigure(self.question, state="hidden" if in_review else "normal")
             c.tag_lower("askhit", self.glow_cap)
+        c.itemconfigure(self.ctx_win, state="normal" if (call and self._ctx_shown) else "hidden")
         if call and len(self._calls) < 2:
             for it in (self.call_nav, self.call_prev, self.call_next):
                 c.itemconfigure(it, state="hidden")
@@ -1899,6 +2063,7 @@ class Widget:
         y = toggle("say_source", "Say which project first", "\u201cFrom agentic os v2.\u201d before each reply", y)
         y = toggle("summaries", "Summarize replies", "Off: read a cleaned-up excerpt instead", y)
         y = toggle("speak_background", "Speak background runs", "Batch and headless runs (always in history)", y)
+        y = toggle("pulse_with_voice", "Pulse with the voice", "Off: a slow, steady breath while speaking", y)
         y += p(14)
 
         # behavior
