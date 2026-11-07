@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -278,7 +279,7 @@ class MemSettings:
         self.version = 0
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
                    "say_source": True, "speak_background": False, "auto_open_calls": True,
-                   "hide_when_idle": False, "calls_hours": 24}
+                   "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send"}
 
     def get(self, k):
         return self._v[k]
@@ -341,6 +342,7 @@ class Widget:
         self.hidden_for_next = None
         self.answered: set[str] = set()
         self._drafts: dict[str, dict] = {}  # call id -> answers so far, sent together once all are in
+        self._typed: list[tuple] = []        # results from typing answers into the Claude app (worker thread)
         self._call_ix = 0
         self._auto_open = None      # call id that opened the panel by itself
         self._calls: list[dict] = []
@@ -1299,6 +1301,15 @@ class Widget:
         self._drafts.pop(cid, None)
         self.vq.history.update(cid, answer=text, answered_at=time.time(),
                                **({"answers": answers} if answers else {}))
+        mode = self.cfg.get("desktop_answers")
+        app_id = getattr(self.api, "desktop_app_id", None)
+        if mode in ("send", "paste") and app_id and app_id(item):
+            # the thread is open in the Claude app: type the answer there, so the thread shows it and the
+            # app's own agent carries on (a background resume would leave that thread out of date)
+            self._toast(f"Typing your answer{'s' if answers else ''} into the {item.get('project')} thread")
+            threading.Thread(target=self._type_desktop, args=(item, text, mode == "send"), daemon=True).start()
+            self._after_call()
+            return
         if self.api.resume_session(self.vq, item, text):
             what = f"{len(answers)} answers" if answers else "Sent"
             self._toast(f"{what} sent to {item.get('project')}. Its reply will play here" if answers
@@ -1308,6 +1319,26 @@ class Widget:
             msg = self.api.open_session(item)
             self._toast((msg + ". " if msg else "") + "No session to resume: answer copied")
         self._after_call()
+
+    def _type_desktop(self, item, text, send):
+        """Worker thread: the UI only learns the result on the next tick (Tk is not thread-safe)."""
+        try:
+            code = self.api.type_into_desktop(item, text, send)
+        except Exception as e:  # never lose an answer to an automation error
+            self.api.log(f"type into desktop error: {e!r}")
+            code = 5
+        self._typed.append((item, text, code))
+
+    def _typed_results(self):
+        while self._typed:
+            item, text, code = self._typed.pop(0)
+            self._toast(self.api.desktop_result.get(code, "Answer copied"))
+            if code in (3, 4, 5):  # not delivered: keep the answer on the clipboard and the call open
+                self._copy(text)
+                cid = self._call_id(item)
+                self.answered.discard(cid)
+                self.vq.history.update(cid, answer=None, answered_at=None, answers=None)
+                self._layout_key = None
 
     # ---------------------------------------------------------- open, copy, replay, toast
     def _open(self, item):
@@ -1371,6 +1402,8 @@ class Widget:
         if self.vq.hide_requested:
             self.vq.hide_requested = False
             self.hide_until_next()
+        if self._typed:
+            self._typed_results()
         # settings changed from outside the player (the HTTP API or settings.json)
         if self.cfg.get("text_size") != self._built_size:
             self._built_size = self.cfg.get("text_size")
@@ -1803,6 +1836,35 @@ class Widget:
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
             return y + h + p(6)
 
+        def choice(key, title, opts, hints, y):
+            """A row of pills, one selected (a setting with a few named values)."""
+            cur = cfg.get(key)
+            c.create_text(x0, y + p(8), anchor="w", text=title, font=self.F["label"], fill=BODY, tags=("set",))
+            y += p(22)
+            x, ch = x0, p(32)
+            for v, label in opts:
+                w = self.F["chip"].measure(label) + p(26)
+                if x > x0 and x + w > x1:
+                    x, y = x0, y + ch + p(8)
+                sel = v == cur
+                base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(255, 255, 255, 36))
+                hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if sel else self.art.pill(
+                    w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
+                tag = f"ch_{key}_{v}"
+                img = c.create_image(x, y, anchor="nw", image=base, tags=("set", tag))
+                c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=OBSIDIAN if sel else FG,
+                              tags=("set", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e, v=v: self._set(key, v))
+                c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h), c.configure(cursor="hand2")))
+                c.tag_bind(tag, "<Leave>", lambda e, i=img, b=base: (c.itemconfigure(i, image=b), c.configure(cursor="")))
+                x += w + p(8)
+            y += ch + p(8)
+            if hints.get(cur):
+                c.create_text(x0, y, anchor="nw", text=hints[cur], font=self.F["meta"], fill=FAINT, width=x1 - x0,
+                              tags=("set",))
+                y += p(18)
+            return y + p(6)
+
         # appearance
         y = eyebrow("APPEARANCE", y)
         y = slider("text_size", "Text size", [0.85, 1.0, 1.15, 1.3, 1.5],
@@ -1844,6 +1906,11 @@ class Widget:
         y = toggle("auto_open_calls", "Open the panel when a call arrives", None, y)
         y = toggle("hide_when_idle", "Hide when nothing is playing", "Comes back with the next reply or call", y)
         y = slider("calls_hours", "Keep calls waiting for", [6, 12, 24, 72], ["6 hours", "12 hours", "1 day", "3 days"], y)
+        y = choice("desktop_answers", "Answers to Claude app threads",
+                   [("send", "Type and send"), ("paste", "Paste only"), ("background", "Background")],
+                   {"send": "Typed into the thread and sent, so it shows there",
+                    "paste": "Typed into the thread; you press Enter",
+                    "background": "Resumed out of sight; the app's thread won't show it"}, y)
 
         # footer
         y += p(10)

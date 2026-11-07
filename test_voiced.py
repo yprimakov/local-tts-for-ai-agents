@@ -271,6 +271,17 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(d["decisions"][1]["options"], [])
         self.assertEqual(d["decisions"][2]["recommended"], 2)
 
+    def test_desktop_answers_setting(self):
+        st = voiced.Settings(None)
+        self.assertEqual(st.get("desktop_answers"), "send")
+        st.update(desktop_answers="nonsense")
+        self.assertEqual(st.get("desktop_answers"), "send")
+        st.update(desktop_answers="background")
+        self.assertEqual(st.get("desktop_answers"), "background")
+        # only replies from a thread open in the Claude app get typed in; others keep the background resume
+        self.assertEqual(voiced.desktop_app_id({"host": {"kind": "terminal"}, "session_id": "x"}), "")
+        self.assertEqual(set(voiced.DESKTOP_RESULT), {0, 1, 3, 4, 5, 6})
+
     def test_combined_answer(self):
         decs = [{"question": "Which backup?", "options": ["Nightly", "NAS"]}, {"question": "Name?", "options": []},
                 {"question": "Ship?", "options": ["Yes", "No"]}]

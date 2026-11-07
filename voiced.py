@@ -65,6 +65,9 @@ SETTINGS_SCHEMA = {
     "auto_open_calls": (bool, True),
     "hide_when_idle": (bool, False),
     "calls_hours": ([6, 12, 24, 72], 24),
+    # answers to a session open in the Claude app: type them into its thread and send, paste only, or the old
+    # background `claude --resume -p` (invisible in the app's thread, which then goes out of date)
+    "desktop_answers": (["send", "paste", "background"], "send"),
 }
 
 
@@ -801,6 +804,7 @@ def focus_pid(pid: int, hint: str = "") -> bool:
 
 
 _DESKTOP_IDS: dict[str, str] = {}
+_DESKTOP_FILES: dict[str, Path] = {}  # local_<uuid> -> its session file
 _CLI_ID = re.compile(rb'"cliSessionId"\s*:\s*"([0-9a-f-]{36})"')
 
 
@@ -828,9 +832,105 @@ def desktop_session_id(cli_sid: str, root: Path | None = None) -> str:
             continue
         if m:
             _DESKTOP_IDS[m.group(1).decode()] = f.stem
+            _DESKTOP_FILES[f.stem] = f
             if m.group(1).decode() == cli_sid:
                 return f.stem
     return ""
+
+
+def desktop_title(app_id: str) -> str:
+    """The thread's title as the Claude app shows it in its header (read fresh: it can be renamed)."""
+    f = _DESKTOP_FILES.get(app_id)
+    try:
+        return str(json.loads(f.read_text(encoding="utf-8")).get("title") or "") if f else ""
+    except (OSError, ValueError):
+        return ""
+
+
+# Types an answer into the Claude app's thread through UI Automation: wait until the app shows the thread
+# (its title in the header), refuse if the input box already holds a draft, paste, check, then press Enter.
+# Exit codes: 0 sent, 1 pasted (not sent, as asked), 3 a draft is in the box, 4 thread or box not found,
+# 5 paste did not land, 6 pasted but Enter did not send it.
+_DESKTOP_TYPE_PS = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Windows.Forms
+$A = [System.Windows.Automation.AutomationElement]; $D = [System.Windows.Automation.TreeScope]::Descendants
+function Cond($v) { New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, $v) }
+function Norm($t) { ($t -replace '\s+', ' ').Trim() }
+$title = $env:VQ_TITLE; $prompt = $null; $until = (Get-Date).AddSeconds(10)
+while ((Get-Date) -lt $until -and -not $prompt) {
+  $p = Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.Path -notlike '*claude-code*' } | Select-Object -First 1
+  if ($p) {
+    $root = $A::FromHandle($p.MainWindowHandle); $top = $root.Current.BoundingRectangle.Top; $here = -not $title
+    if ($title) {
+      foreach ($h in $root.FindAll($D, (Cond $title))) {
+        if ($h.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text -and $h.Current.BoundingRectangle.Top -lt $top + 80) { $here = $true }
+      }
+    }
+    if ($here) { $prompt = $root.FindFirst($D, (Cond 'Prompt')) }
+  }
+  if (-not $prompt) { Start-Sleep -Milliseconds 300 }
+}
+if (-not $prompt) { exit 4 }
+$tp = $prompt.GetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern)
+if ((Norm $tp.DocumentRange.GetText(200))) { exit 3 }
+$old = $null; try { if ([System.Windows.Forms.Clipboard]::ContainsText()) { $old = [System.Windows.Forms.Clipboard]::GetText() } } catch {}
+[System.Windows.Forms.Clipboard]::SetText($env:VQ_TEXT)
+$prompt.SetFocus(); Start-Sleep -Milliseconds 250
+[System.Windows.Forms.SendKeys]::SendWait('^v'); Start-Sleep -Milliseconds 500
+$want = Norm $env:VQ_TEXT; $got = Norm $tp.DocumentRange.GetText(100000)
+$code = 0
+if (-not $got.StartsWith($want.Substring(0, [Math]::Min(40, $want.Length)))) { $code = 5 }
+elseif ($env:VQ_SEND -ne '1') { $code = 1 }
+else {
+  [System.Windows.Forms.SendKeys]::SendWait('{ENTER}'); Start-Sleep -Milliseconds 900
+  if ((Norm $tp.DocumentRange.GetText(200))) { $code = 6 }
+}
+if ($old) { try { [System.Windows.Forms.Clipboard]::SetText($old) } catch {} }
+exit $code
+"""
+
+DESKTOP_RESULT = {
+    0: "Sent in the Claude app thread",
+    1: "Pasted in the Claude app thread: press Enter to send",
+    3: "Your draft is in that thread's box, so nothing was typed. Answer copied",
+    4: "Couldn't find that thread in the Claude app. Answer copied",
+    5: "Couldn't paste into the thread. Answer copied",
+    6: "Pasted in the thread, but it didn't send: press Enter there",
+}
+
+
+def desktop_app_id(item: dict) -> str:
+    """The Claude app's id for a reply that came from a thread open in the app, else ''."""
+    if sys.platform != "win32" or (item.get("host") or {}).get("kind") != "desktop":
+        return ""
+    return desktop_session_id(item.get("session_id") or "")
+
+
+def type_into_desktop(item: dict, text: str, send: bool = True) -> int:
+    """Open the reply's thread in the Claude app and type the answer there, so the thread shows it and the
+    app's own agent carries on. Blocking (a few seconds); returns an exit code from DESKTOP_RESULT."""
+    import base64
+    import subprocess
+    app_id = desktop_app_id(item)
+    if not app_id:
+        return 4
+    os.startfile(f"claude://code/continue?session={app_id}&source=desktop_action")
+    env = dict(os.environ, VQ_TEXT=text, VQ_TITLE=desktop_title(app_id), VQ_SEND="1" if send else "0")
+    enc = base64.b64encode(_DESKTOP_TYPE_PS.encode("utf-16-le")).decode()
+    try:
+        p = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Sta", "-EncodedCommand", enc],
+                           env=env, capture_output=True, timeout=40,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        code = p.returncode
+        if code not in DESKTOP_RESULT:
+            log(f"type into desktop failed ({code}): {p.stderr.decode(errors='replace')[:300]!r}")
+            code = 5
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"type into desktop failed: {e!r}")
+        code = 5
+    log(f"typed answer into {app_id[:14]}: {DESKTOP_RESULT[code]}")
+    return code
 
 
 def open_session(item: dict) -> str:
@@ -929,7 +1029,9 @@ def main(argv=None) -> int:
     else:
         from types import SimpleNamespace
         from player import Widget
-        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session)).run()
+        Widget(vq, SimpleNamespace(log=log, open_session=open_session, resume_session=resume_session,
+                                   desktop_app_id=desktop_app_id, type_into_desktop=type_into_desktop,
+                                   desktop_result=DESKTOP_RESULT)).run()
     vq.stop()
     server.shutdown()
     return 0
