@@ -69,6 +69,9 @@ SETTINGS_SCHEMA = {
     # background `claude --resume -p` (invisible in the app's thread, which then goes out of date)
     "desktop_answers": (["send", "paste", "background"], "send"),
     "pulse_with_voice": (bool, True),  # the rim and orb follow the voice's loudness instead of a slow breath
+    # rim pulse colour (MadeFire Promethean Amber first) and how far its glow reaches into the card (px)
+    "rim_color": (["#F59E0B", "#EA580C", "#FBBF24", "#F43F5E", "#8B5CF6", "#3B82F6", "#14B8A6", "#E5E7EB"], "#F59E0B"),
+    "glow_size": ([0, 6, 12, 18, 24], 12),
 }
 
 
@@ -301,6 +304,55 @@ def find_visuals(message: str, cwd: str = "", limit: int = 4) -> list[dict]:
     return out
 
 
+def transcript_path(cwd: str, session_id: str, root: Path | None = None) -> Path | None:
+    """Claude Code's transcript for a session: ~/.claude/projects/<cwd, non-alphanumerics as '-'>/<id>.jsonl."""
+    if not session_id:
+        return None
+    root = root or (Path.home() / ".claude" / "projects")
+    p = root / re.sub(r"[^A-Za-z0-9]", "-", cwd or "") / f"{session_id}.jsonl"
+    if p.is_file():
+        return p
+    found = next(iter(root.glob(f"*/{session_id}.jsonl")), None) if root.is_dir() else None
+    return found
+
+
+def _iso_ts(s: str) -> float:
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return 0.0
+
+
+def user_turn_after(path: Path, since: float, tail: int = 262144) -> float:
+    """Time of a message Yury typed in the session after `since` (0 if none): a real user turn, not a tool
+    result, slash-command output, compaction summary or other meta entry."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - tail))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0.0
+    for line in reversed(lines):
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        ts = _iso_ts(d.get("timestamp") or "")
+        if ts and ts <= since:
+            return 0.0  # older than the call: nothing after it
+        if d.get("type") != "user" or d.get("isMeta") or d.get("isCompactSummary"):
+            continue
+        content = (d.get("message") or {}).get("content")
+        texts = [content] if isinstance(content, str) else [
+            c.get("text", "") for c in (content or []) if isinstance(c, dict) and c.get("type") == "text"]
+        if any(t.strip() and not t.lstrip().startswith("<") for t in texts):
+            return ts
+    return 0.0
+
+
 def decisions_of(item: dict) -> list[dict]:
     """All questions a reply asks Yury (rows from before grouped calls only have `decision`)."""
     decs = item.get("decisions")
@@ -509,6 +561,33 @@ class VoiceQueue:
             self.queue.append(item)
             self._cv.notify_all()
         return item
+
+    def watch_answers(self, every: float = 4.0, hours: float = 72) -> None:
+        """A call answered in its own thread (Yury typed there) is closed here too, without waiting for the
+        agent's next reply. Only transcripts that changed since the call are read, and only their tail."""
+        seen: dict[str, float] = {}  # row id -> transcript mtime already checked
+        while not self._stop:
+            try:
+                for r in self.history.recent(200):
+                    if (not r.get("decision") or r.get("answer") or r.get("dismissed") or r.get("headless")
+                            or time.time() - r.get("ts", 0) > hours * 3600):
+                        continue
+                    p = transcript_path(r.get("cwd") or "", r.get("session_id") or "")
+                    try:
+                        mt = p.stat().st_mtime if p else 0
+                    except OSError:
+                        mt = 0
+                    if mt <= r.get("ts", 0) or seen.get(r["id"]) == mt:
+                        continue
+                    seen[r["id"]] = mt
+                    at = user_turn_after(p, r.get("ts", 0))
+                    if at:
+                        self.history.update(r["id"], answer="Answered in the thread", answered_at=at,
+                                            answered_in="thread")
+                        log(f"call {r['id']} ({r.get('project')}) answered in its thread")
+            except Exception as e:  # never stop watching over one bad row
+                log(f"watch answers: {e!r}")
+            time.sleep(every)
 
     def summarize_loop(self) -> None:
         """Summaries run one at a time, oldest first, so the speaker never waits on a later item."""
@@ -1094,6 +1173,7 @@ def main(argv=None) -> int:
     threading.Thread(target=vq.run, daemon=True).start()
     if summarizer:
         threading.Thread(target=vq.summarize_loop, daemon=True).start()
+    threading.Thread(target=vq.watch_answers, daemon=True).start()
 
     def prune():
         while True:

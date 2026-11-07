@@ -445,7 +445,9 @@ reply is speaking. Three sizes:
   decision from the last 24 hours across all projects, newest first (arrows step through them). Pick an
   option (or press 1-9), or type another option or a follow-up and press Enter: it is sent to that session
   with `claude --resume <id> -p` in the background, and the session's reply plays here. A call disappears
-  once you answer it, dismiss it, or the session replies again (you answered it there).
+  once you answer it, dismiss it, or the session replies again. If you answer in the thread itself
+  (you type a reply there after the question), the daemon sees it in the thread's transcript within a few
+  seconds, marks the call "Answered in the thread", and the player drops it with a short notice.
   When one reply asks several questions they stay together as one call ("Question 1 of 3"): answer or skip
   (S) each one, check them on the review step (click a row to change it), then **Send answers** (Enter)
   delivers them to the session in one message. Nothing is sent until then, so the agent never acts on half
@@ -475,12 +477,14 @@ The gear button opens Settings. Changes apply at once and are saved to
 | --- | --- | --- |
 | Text size (scales the whole player) | S, M, L, XL, XXL | M |
 | Opacity | 70, 80, 90, 100% | 100% |
+| Pulse color (rim and glow) | Promethean Amber (MadeFire orange), Cooled Ember, Ember Light, Rose, Violet, Blue, Teal, White | Promethean Amber |
+| Glow size (how far the glow reaches outside the rim) | Rim only, Small, Medium, Large, Largest | Medium |
+| Pulse with the voice (rim and orb follow the voice's loudness; off: slow breath) | on/off | on |
 | Voice (click to hear it) | Heart, Bella, Nicole, Sarah, Michael, Adam, Emma (UK), George (UK) | Heart |
 | Speaking speed | 0.9x to 1.4x | 1x |
 | Say which project first | on/off | on |
 | Summarize replies (off reads a cleaned-up excerpt) | on/off | on |
 | Speak background runs | on/off | off |
-| Pulse with the voice (rim and orb follow the voice's loudness; off: slow breath) | on/off | on |
 | Open the panel when a call arrives | on/off | on |
 | Hide when nothing is playing | on/off | off |
 | Keep calls waiting for | 6h, 12h, 1 day, 3 days | 1 day |
@@ -488,7 +492,7 @@ The gear button opens Settings. Changes apply at once and are saved to
 
 "Restore defaults" and "Reset position" are at the bottom. Scripts can read and change the same values:
 `GET /settings`, and `POST /settings` with a JSON object of the keys to change (unknown keys and values are
-ignored). To add a setting, add it to `SETTINGS_SCHEMA` in `voiced.py` and a control in
+ignored). Changing the pulse color, glow size or pulse toggle plays a short preview pulse. To add a setting, add it to `SETTINGS_SCHEMA` in `voiced.py` and a control in
 `Widget._settings_panel` in `player.py`.
 
 It is light: one canvas, no widget per row, and animations run only while something moves (about 1% of a

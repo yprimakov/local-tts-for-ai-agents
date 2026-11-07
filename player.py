@@ -281,7 +281,7 @@ class MemSettings:
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
                    "say_source": True, "speak_background": False, "auto_open_calls": True,
                    "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send",
-                   "pulse_with_voice": True}
+                   "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12}
 
     def get(self, k):
         return self._v[k]
@@ -297,6 +297,8 @@ class MemSettings:
         self.version = v + 1
 
 
+RIM_NAMES = {"#F59E0B": "Promethean Amber", "#EA580C": "Cooled Ember", "#FBBF24": "Ember Light",
+             "#F43F5E": "Rose", "#8B5CF6": "Violet", "#3B82F6": "Blue", "#14B8A6": "Teal", "#E5E7EB": "White"}
 SIZE_NAMES = {0.85: "Small", 1.0: "Default", 1.15: "Large", 1.3: "Larger", 1.5: "Largest"}
 VOICE_NAMES = {"af_heart": "Heart", "af_bella": "Bella", "af_nicole": "Nicole", "af_sarah": "Sarah",
                "am_michael": "Michael", "am_adam": "Adam", "bf_emma": "Emma \u00b7 UK", "bm_george": "George \u00b7 UK"}
@@ -355,6 +357,8 @@ class Widget:
         self._shown = None
         self._prog = (0.0, 0.0, 0.0, False)  # pos, dur, wall clock, running
         self._env_k = 0.0                       # smoothed voice loudness for the pulse
+        self._rings: list[int] = []             # inner glow rings
+        self._ring_k = 0.0
         self._scrub = None
         self._level = -1
         self._anims: dict = {}
@@ -752,9 +756,46 @@ class Widget:
         self._xy = (x, y)
         self.root.geometry(f"+{x}+{y}")
 
+    # inner glow: rounded rings inside the rim, fading inwards, in the pulse colour
+    @staticmethod
+    def _rr_points(x0, y0, x1, y1, r):
+        r = max(1.0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
+        pts = []
+        for cx, cy, a0 in ((x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0), (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)):
+            for k in range(7):
+                a = math.radians(a0 + 15 * k)
+                pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
+        return pts + pts[:2]
+
+    def _glow_rings(self, k: float, recolor=True):
+        c, p = self.c, self.p
+        size = p(int(self.cfg.get("glow_size") or 0))
+        step = max(1, p(2))
+        n = size // step if size else 0
+        while len(self._rings) < n:
+            self._rings.append(c.create_line(0, 0, 0, 0, width=step, fill=CARD, state="hidden", tags=("bg", "ring")))
+        while len(self._rings) > n:
+            c.delete(self._rings.pop())
+        self._ring_k = k
+        if not n or k <= 0.01:
+            c.itemconfigure("ring", state="hidden")
+            return
+        rim = self.cfg.get("rim_color") or AMBER
+        r, w, h = self._radius or 0, self.Wp, self.h
+        for i, ln in enumerate(self._rings):
+            inset = 1 + i * step + step / 2
+            c.coords(ln, *self._rr_points(inset, inset, w - 1 - inset, h - 1 - inset, r - inset))
+            if recolor:
+                a = k * 0.8 * (1 - i / n) ** 1.7
+                # a faint ring would be darker than the card's ambient light behind it: leave it out
+                c.itemconfigure(ln, fill=mix(CARD, rim, a), state="disabled" if a >= 0.09 else "hidden")
+        c.tag_raise("ring", self.glow_pan)
+
     def _set_height(self, h: int):
         h = max(self.p(CAP_H), int(h))
         self.h = h
+        if getattr(self, "_rings", None) and self._ring_k > 0.01:
+            self._glow_rings(self._ring_k, recolor=False)
         c, Wp = self.c, self.Wp
         c.coords(self.card, 0, 0, Wp, h)
         c.coords(self.rim_l, 0, 0, 0, h)
@@ -992,8 +1033,10 @@ class Widget:
             dim = lvl == -2
             k = 0 if dim else lvl / (LEVELS - 1)
             self.c.itemconfigure(self.orb, image=self.art.orb(k, dim=dim))
-            edge = mix(HAIR, EDGE_HOT, k * 0.9) if speaking else HAIR
+            rim = self.cfg.get("rim_color") or AMBER
+            edge = mix(HAIR, rim, 0.25 + 0.75 * k) if speaking else HAIR
             self._set_shape(self._radius, edge)
+            self._glow_rings(k if speaking else 0.0)
         return speaking or self._scrub is not None
 
     def _draw_progress(self, frac, dur):
@@ -1027,6 +1070,17 @@ class Widget:
 
     # ---------------------------------------------------------- calls (decisions waiting on Yury)
     def _collect_calls(self, cur) -> list[dict]:
+        calls = self._collect_calls_raw(cur)
+        ids = {self._call_id(x) for x in calls}
+        for cid in getattr(self, "_prev_call_ids", set()) - ids:
+            row = self.vq.history.get(cid) or {}
+            if row.get("answered_in") == "thread":
+                self._toast(f"{row.get('project') or 'A call'} was answered in its thread")
+                self._drafts.pop(cid, None)
+        self._prev_call_ids = ids
+        return calls
+
+    def _collect_calls_raw(self, cur) -> list[dict]:
         now = time.time()
         calls, seen = [], set()
         rows = self.vq.history.recent(150)
@@ -1035,7 +1089,9 @@ class Widget:
             sid = r.get("session_id")
             if sid and r.get("status") not in BACKGROUND:
                 newest[sid] = max(newest.get(sid, 0), r.get("ts", 0))
-        if cur and cur.get("decision") and (cur.get("replay_of") or cur["id"]) not in self.answered:
+        cur_row = self.vq.history.get(cur.get("replay_of") or cur["id"]) if cur else None
+        if (cur and cur.get("decision") and (cur.get("replay_of") or cur["id"]) not in self.answered
+                and not (cur_row or {}).get("answer") and not (cur_row or {}).get("dismissed")):
             calls.append(cur)
             seen.add(cur.get("replay_of") or cur["id"])
         for r in rows:
@@ -1907,6 +1963,24 @@ class Widget:
                 pass
         self._layout_key = None
         self._tick_once(force=True)
+        if key in ("rim_color", "glow_size", "pulse_with_voice"):
+            self._preview_pulse()
+
+    def _preview_pulse(self):
+        """Two pulses in the chosen colour and glow size, so a change is visible without a voiceover."""
+        rim = self.cfg.get("rim_color") or AMBER
+
+        def step(t):
+            k = abs(math.sin(2 * math.pi * t))
+            self._set_shape(self._radius, mix(HAIR, rim, 0.25 + 0.75 * k))
+            self._glow_rings(k)
+
+        def done():
+            self._level = -1  # the live loop redraws the real state
+            self._set_shape(self._radius, HAIR)
+            self._glow_rings(0.0)
+            self._kick()
+        self._anim("rimpreview", 1.4, step, ease=lambda t: t, done=done)
 
     def _settings_panel(self, force):
         c, p, Wp = self.c, self.p, self.Wp
@@ -2000,6 +2074,31 @@ class Widget:
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
             return y + h + p(6)
 
+        def swatches(key, title, y):
+            """Colour dots; the chosen one has a ring. Hover shows the colour's name."""
+            cur = cfg.get(key)
+            vt = c.create_text(x1, y + p(8), anchor="e", text=RIM_NAMES.get(cur, cur), font=self.F["mono"],
+                               fill=EMBER, tags=("set",))
+            c.create_text(x0, y + p(8), anchor="w", text=title, font=self.F["label"], fill=BODY, tags=("set",))
+            y += p(24)
+            d, gap = 22, p(10)
+            dp = p(d)
+            cols = list(RIM_NAMES)
+            for n, col in enumerate(cols):
+                cx = x0 + dp / 2 + p(3) + n * (dp + gap)
+                cy = y + dp / 2 + p(3)
+                tag = f"sw_{n}"
+                if col == cur:
+                    c.create_image(cx, cy, image=self.art.circle(d + 8, fill=(0, 0, 0, 0), outline=Art._rgba(col)),
+                                   tags=("set", tag))
+                c.create_image(cx, cy, image=self.art.circle(d, fill=Art._rgba(col)), tags=("set", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e, col=col: self._set(key, col))
+                c.tag_bind(tag, "<Enter>", lambda e, col=col: (c.configure(cursor="hand2"),
+                                                               c.itemconfigure(vt, text=RIM_NAMES[col])))
+                c.tag_bind(tag, "<Leave>", lambda e: (c.configure(cursor=""),
+                                                      c.itemconfigure(vt, text=RIM_NAMES.get(cfg.get(key), ""))))
+            return y + dp + p(14)
+
         def choice(key, title, opts, hints, y):
             """A row of pills, one selected (a setting with a few named values)."""
             cur = cfg.get(key)
@@ -2033,7 +2132,11 @@ class Widget:
         y = eyebrow("APPEARANCE", y)
         y = slider("text_size", "Text size", [0.85, 1.0, 1.15, 1.3, 1.5],
                    [SIZE_NAMES[v] for v in (0.85, 1.0, 1.15, 1.3, 1.5)], y)
-        y = slider("opacity", "Opacity", [0.7, 0.8, 0.9, 1.0], ["70%", "80%", "90%", "100%"], y) + p(14)
+        y = slider("opacity", "Opacity", [0.7, 0.8, 0.9, 1.0], ["70%", "80%", "90%", "100%"], y)
+        y = swatches("rim_color", "Pulse color", y)
+        y = slider("glow_size", "Glow size", [0, 6, 12, 18, 24], ["Rim only", "Small", "Medium", "Large", "Largest"], y)
+        y = toggle("pulse_with_voice", "Pulse with the voice", "Off: a slow, steady breath while speaking", y)
+        y += p(14)
 
         # voice
         y = eyebrow("VOICE", y, ("Play a sample", self._preview))
@@ -2063,7 +2166,6 @@ class Widget:
         y = toggle("say_source", "Say which project first", "\u201cFrom agentic os v2.\u201d before each reply", y)
         y = toggle("summaries", "Summarize replies", "Off: read a cleaned-up excerpt instead", y)
         y = toggle("speak_background", "Speak background runs", "Batch and headless runs (always in history)", y)
-        y = toggle("pulse_with_voice", "Pulse with the voice", "Off: a slow, steady breath while speaking", y)
         y += p(14)
 
         # behavior
@@ -2105,6 +2207,8 @@ class Widget:
     def _short(key, v):
         if key == "text_size":
             return {0.85: "S", 1.0: "M", 1.15: "L", 1.3: "XL", 1.5: "XXL"}[v]
+        if key == "glow_size":
+            return {0: "off", 6: "S", 12: "M", 18: "L", 24: "XL"}[v]
         if key == "opacity":
             return f"{int(v * 100)}"
         if key == "speed":

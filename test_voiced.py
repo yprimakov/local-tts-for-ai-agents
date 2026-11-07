@@ -413,6 +413,28 @@ class SummaryQueueTests(unittest.TestCase):
         self.assertLess(max(env[:10]), 0.05)
         self.assertGreater(min(env[15:]), 0.9)
 
+    def test_answer_typed_in_the_thread_closes_the_call(self):
+        root = Path(tempfile.mkdtemp())
+        cwd = "C:\\.Projects\\go-getter-bot"
+        d = root / "C---Projects-go-getter-bot"
+        d.mkdir()
+        t = d / "abc.jsonl"
+        import datetime as dt
+        iso = lambda s: dt.datetime.fromtimestamp(s, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        call_ts = time.time() - 60
+        lines = [{"type": "user", "timestamp": iso(call_ts - 30), "message": {"content": "earlier"}},
+                 {"type": "assistant", "timestamp": iso(call_ts - 5), "message": {"content": [{"type": "text", "text": "1. A or B?"}]}},
+                 {"type": "user", "timestamp": iso(call_ts + 5), "message": {"content": [{"type": "tool_result", "content": "x"}]}},
+                 {"type": "user", "timestamp": iso(call_ts + 6), "isMeta": True, "message": {"content": "meta"}},
+                 {"type": "user", "timestamp": iso(call_ts + 7), "message": {"content": "<command-name>/x</command-name>"}}]
+        t.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+        self.assertEqual(voiced.transcript_path(cwd, "abc", root), t)
+        self.assertEqual(voiced.user_turn_after(t, call_ts), 0.0)  # tool results, meta and commands don't count
+        with t.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "user", "timestamp": iso(call_ts + 20),
+                                "message": {"content": [{"type": "text", "text": "1A, 2B"}]}}) + "\n")
+        self.assertAlmostEqual(voiced.user_turn_after(t, call_ts), call_ts + 20, delta=1)
+
     def test_headless_flag_from_hook(self):
         it = self.vq.say("x", cwd="C:/a", message="hi there friend", entrypoint="claude-desktop", headless=True)
         self.assertEqual(it["status"], "not spoken: headless run")
