@@ -569,7 +569,7 @@ class VoiceQueue:
         while not self._stop:
             try:
                 for r in self.history.recent(200):
-                    if (not r.get("decision") or r.get("answer") or r.get("dismissed") or r.get("headless")
+                    if (not decisions_of(r) or r.get("answer") or r.get("dismissed") or r.get("headless")
                             or time.time() - r.get("ts", 0) > hours * 3600):
                         continue
                     p = transcript_path(r.get("cwd") or "", r.get("session_id") or "")
@@ -890,6 +890,9 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                             message=str(d.get("message") or ""), headless=bool(d.get("headless")), host=host)
                 it = {k: x for k, x in it.items() if k != "message"}
                 return self._json(200, it)
+            if self.path == "/show":  # the "Voice player" shortcut
+                vq.show_requested = True
+                return self._json(200, {"ok": True})
             if self.path == "/control":
                 a, iid = d.get("action"), str(d.get("id") or "")
                 if a == "pause": vq.pause()

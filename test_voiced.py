@@ -178,10 +178,37 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(post("/say", {"text": "x"}, {"origin": "https://evil.example"})[0], 403)
             self.assertEqual(post("/control", {"action": "pause"})[1]["paused"], True)
             self.assertEqual(post("/control", {"action": "bogus"})[0], 400)
+            self.assertEqual(post("/show", {})[0], 200)
+            self.assertTrue(vq.show_requested)
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/history", timeout=2) as r:
                 self.assertEqual(json.loads(r.read())[0]["text"], "hi there")
         finally:
             srv.shutdown()
+            vq.stop()
+
+
+class WatchAnswersTests(unittest.TestCase):
+    def test_multi_question_call_answered_in_thread_closes(self):
+        import datetime as dt
+        h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
+        vq = voiced.VoiceQueue(h, fake_synth, FakePlayer)
+        call_ts = time.time() - 60
+        t = Path(tempfile.mkdtemp()) / "abc.jsonl"
+        iso = dt.datetime.fromtimestamp(call_ts + 20, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        t.write_text(json.dumps({"type": "user", "timestamp": iso,
+                                 "message": {"content": [{"type": "text", "text": "1A, 2B"}]}}) + chr(10),
+                     encoding="utf-8")
+        decs = [{"question": "A or B?", "options": ["A", "B"]}, {"question": "C or D?", "options": ["C", "D"]}]
+        h.add({"id": "multi1", "ts": call_ts, "cwd": "C:/x", "session_id": "abc", "text": "two questions",
+               "decisions": decs})
+        old = voiced.transcript_path
+        voiced.transcript_path = lambda cwd, sid, *a: t
+        try:
+            threading.Thread(target=vq.watch_answers, kwargs={"every": 0.05}, daemon=True).start()
+            self.assertTrue(wait(lambda: any(r["id"] == "multi1" and r.get("answered_in") == "thread"
+                                             for r in h.recent(10))))
+        finally:
+            voiced.transcript_path = old
             vq.stop()
 
 

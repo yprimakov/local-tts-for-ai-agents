@@ -1089,6 +1089,37 @@ class Widget:
         if self._glass:
             self._glass.show()
 
+    def summon(self):
+        """Bring the player back for sure (the "Voice player" shortcut, POST /show): onto a visible screen,
+        un-hidden, and redrawn from scratch in case the window lost its picture."""
+        if not self._on_screen():
+            self._reset_position()
+        if self._visible:
+            self.root.after(10, self._rebuild)
+            self.root.deiconify()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self._set_alpha(self._alpha())
+            if self._glass:
+                self._glass.show()
+        else:
+            self.show()
+
+    def _on_screen(self) -> bool:
+        """True when the player's top-left area lies on a connected monitor (Windows; elsewhere assume so)."""
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+            from ctypes import wintypes as W
+            x, y = self._xy
+            u = ctypes.windll.user32
+            u.MonitorFromRect.restype = ctypes.c_void_p
+            rc = W.RECT(x, y, x + self.p(60), y + self.p(40))
+            return bool(u.MonitorFromRect(ctypes.byref(rc), 0))  # MONITOR_DEFAULTTONULL
+        except Exception:
+            return True
+
     def _alpha(self) -> float:
         return float(self.cfg.get("opacity"))
 
@@ -1852,7 +1883,7 @@ class Widget:
         cur, q = st["current"], st["queue"]
         if self.vq.show_requested:
             self.vq.show_requested = False
-            self.show()
+            self.summon()
         if self.vq.hide_requested:
             self.vq.hide_requested = False
             self.hide_until_next()
