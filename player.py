@@ -234,18 +234,26 @@ class Art:
             return self._down(im, w, h)
         return self.get(("pill", w, h, fill, outline, grad), make)
 
-    def corners(self, r: int, edge: str):
-        """Four corner masks (device px radius r): key colour outside the curve, the rim on it, clear inside."""
+    def corners(self, r: int, edge: str, inset: float = 0.0, ring: bool = True):
+        """Four corner masks (device px radius r): key colour outside the curve, the rim on it, clear inside.
+        The window can only hide pixels by colour key, all or nothing, so the key is binary: a pixel is key
+        when under half of it lies inside the curve (inset by `inset` px). A blended key pixel would show as
+        a dark fringe. On Windows CornerGlass draws the smooth curve and rim on top, so there is no ring here."""
         def make_all():
             I, D, SS = self.I, self.D, self.SS
-            n = 2 * r * SS
-            im = I.new("RGBA", (n, n), self._rgba(KEY))
-            dr = D.Draw(im)
-            dr.ellipse((0, 0, n - 1, n - 1), fill=self._rgba(edge))
-            dr.ellipse((SS, SS, n - 1 - SS, n - 1 - SS), fill=(0, 0, 0, 0))
-            full = self._down(im, 2 * r, 2 * r)
-            return [full.crop(b) for b in ((0, 0, r, r), (r, 0, 2 * r, r), (0, r, r, 2 * r), (r, r, 2 * r, 2 * r))]
-        key = ("corners", r, edge)
+            n, m, i = 2 * r * SS, 2 * r, int(round(inset * SS))
+            out = I.new("L", (n, n), 255)
+            D.Draw(out).ellipse((i, i, n - 1 - i, n - 1 - i), fill=0)
+            hole = out.resize((m, m), I.BOX).point(lambda v: 255 if v >= 128 else 0)
+            im = I.new("RGBA", (n, n), (0, 0, 0, 0))
+            if ring:
+                dr = D.Draw(im)
+                dr.ellipse((i, i, n - 1 - i, n - 1 - i), fill=self._rgba(edge))
+                dr.ellipse((i + SS, i + SS, n - 1 - i - SS, n - 1 - i - SS), fill=(0, 0, 0, 0))
+            full = self._down(im, m, m)
+            full.paste(I.new("RGBA", (m, m), self._rgba(KEY)), (0, 0), hole)
+            return [full.crop(b) for b in ((0, 0, r, r), (r, 0, m, r), (0, r, r, m), (r, r, m, m))]
+        key = ("corners", r, edge if ring else None, inset)
         if key not in self._cache:
             self._cache[key] = [self.TK.PhotoImage(c) for c in make_all()]
         return self._cache[key]
@@ -271,7 +279,167 @@ class Art:
                 px[x, 0] = (245, 158, 11, int(185 * a))
             im.alpha_composite(line, (0, 0))
             return im
-        return self.get(("glow", w, h, kind), make)
+        self._cache[("glow_make", w, h, kind)] = make
+        return self.get(("glow", w, h, kind), lambda: self.glow_pil(w, h, kind, make))
+
+    def glow_pil(self, w: int, h: int, kind: str, make=None):
+        """The ambient light as a Pillow image (CornerGlass samples it)."""
+        key = ("glow_pil", w, h, kind)
+        if key not in self._cache:
+            if make is None:
+                self.glow(w, h, kind)  # makes and caches it on first use
+                make = self._cache.get(("glow_make", w, h, kind))
+            if key not in self._cache:
+                self._cache[key] = make()
+        return self._cache[key]
+
+
+class CornerGlass:
+    """Windows only. Four tiny click-through windows with per-pixel alpha, one over each corner of the card.
+    Tk hides pixels by colour key only, so its own corners are binary and stepped; these draw the smooth
+    outer curve, the rim and a band of card colour that fades out inwards over the stepped edge.
+    They are owned by the Tk window, so they stay just above it in the z-order."""
+    INSET = 1.0   # px the Tk window's binary curve sits inside the true one (so the glass covers it)
+    FADE = 1.0    # px over which the card band fades out, after staying solid to INSET + 0.5 px
+
+    def __init__(self, root, art):
+        import ctypes
+        from ctypes import wintypes as W
+        self.ct, self.art = ctypes, art
+        u, g = ctypes.windll.user32, ctypes.windll.gdi32
+        self.u, self.g = u, g
+        H = ctypes.c_void_p
+        u.CreateWindowExW.restype = H
+        u.CreateWindowExW.argtypes = [W.DWORD, W.LPCWSTR, W.LPCWSTR, W.DWORD, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, H, H, H, H]
+        u.GetDC.restype, u.GetDC.argtypes = H, [H]
+        u.ReleaseDC.argtypes = [H, H]
+        u.ShowWindow.argtypes = [H, ctypes.c_int]
+        u.DestroyWindow.argtypes = [H]
+        u.GetWindowRect.argtypes = [H, ctypes.POINTER(W.RECT)]
+        u.IsWindow.argtypes = [H]
+        u.UpdateLayeredWindow.argtypes = [H, H, H, H, H, H, W.DWORD, H, W.DWORD]
+        g.CreateCompatibleDC.restype, g.CreateCompatibleDC.argtypes = H, [H]
+        g.CreateDIBSection.restype = H
+        g.CreateDIBSection.argtypes = [H, H, ctypes.c_uint, ctypes.POINTER(H), H, W.DWORD]
+        g.SelectObject.restype, g.SelectObject.argtypes = H, [H, H]
+        g.DeleteObject.argtypes = [H]
+        g.DeleteDC.argtypes = [H]
+
+        class BLEND(ctypes.Structure):
+            _fields_ = [("op", ctypes.c_ubyte), ("flags", ctypes.c_ubyte), ("alpha", ctypes.c_ubyte),
+                        ("fmt", ctypes.c_ubyte)]
+        self.BLEND, self.POINT, self.SIZE, self.RECT = BLEND, W.POINT, W.SIZE, W.RECT
+        root.update_idletasks()
+        self.owner = int(root.wm_frame(), 16)
+        # LAYERED | TRANSPARENT (click-through) | TOOLWINDOW | NOACTIVATE | TOPMOST
+        ex = 0x80000 | 0x20 | 0x80 | 0x08000000 | 0x8
+        self.hw = [u.CreateWindowExW(ex, "Static", None, 0x80000000, 0, 0, 1, 1, self.owner, None, None, None)
+                   for _ in range(4)]
+        if not all(self.hw):
+            raise OSError("CreateWindowExW failed")
+        self.r, self.quads, self.alpha, self.shown = 0, None, 0.0, False
+        self._cache: dict = {}
+
+    def _render(self, r: int, edge: str, band, backdrop):
+        key = (r, edge, band or backdrop[0])
+        if key not in self._cache:
+            if len(self._cache) > 300:   # the rim pulse makes a new colour every frame
+                self._cache.clear()
+            I, D, SS = self.art.I, self.art.D, self.art.SS
+            n, m = 2 * r * SS, 2 * r
+            # the band is what the card shows there: a flat glow-ring colour, or the card under its ambient light
+            col = I.new("RGB", (n, n), _rgb(band)) if band else backdrop[1].resize((n, n), I.NEAREST)
+            rim = I.new("L", (n, n), 0)
+            D.Draw(rim).ellipse((0, 0, n - 1, n - 1), fill=255)
+            D.Draw(rim).ellipse((SS, SS, n - 1 - SS, n - 1 - SS), fill=0)
+            col.paste(_rgb(edge), (0, 0, n, n), rim)
+            a = I.new("L", (n, n), 0)
+            da = D.Draw(a)
+            da.ellipse((0, 0, n - 1, n - 1), fill=255)
+            steps = 8
+            for k in range(1, steps + 1):  # card band: solid to the inset curve, then fading out
+                i = int(round((self.INSET + 0.5 + self.FADE * k / steps) * SS))
+                if 2 * i < n - 2:
+                    da.ellipse((i, i, n - 1 - i, n - 1 - i), fill=round(255 * (1 - k / steps)))
+            col.putalpha(a)
+            full = col.convert("RGBa").resize((m, m), I.BOX)   # premultiplied, as UpdateLayeredWindow wants
+            rr, gg, bb, aa = full.split()
+            full = I.merge("RGBa", (bb, gg, rr, aa))           # BGRA byte order
+            self._cache[key] = [full.crop(b).tobytes() for b in
+                                ((0, 0, r, r), (r, 0, m, r), (0, r, r, m), (r, r, m, m))]
+        return self._cache[key]
+
+    def _spots(self):
+        rc = self.RECT()
+        self.u.GetWindowRect(self.owner, self.ct.byref(rc))
+        r = self.r
+        return [(rc.left, rc.top), (rc.right - r, rc.top), (rc.left, rc.bottom - r), (rc.right - r, rc.bottom - r)]
+
+    def _push(self, content: bool):
+        if not self.r or not self.quads:
+            return
+        ct, u, g, r = self.ct, self.u, self.g, self.r
+        blend = self.BLEND(0, 0, max(0, min(255, round(255 * self.alpha))), 1)  # AC_SRC_ALPHA
+        if not content:
+            for hw, (x, y) in zip(self.hw, self._spots()):
+                u.UpdateLayeredWindow(hw, None, ct.byref(self.POINT(x, y)), None, None, None, 0,
+                                      ct.byref(blend), 2)
+            return
+        screen = u.GetDC(None)
+        mem = g.CreateCompatibleDC(screen)
+        hdr = (ct.c_uint32 * 11)(40, r, (-r) & 0xFFFFFFFF, 1 | (32 << 16), 0, 0, 0, 0, 0, 0, 0)  # BITMAPINFOHEADER
+        try:
+            for hw, (x, y), data in zip(self.hw, self._spots(), self.quads):
+                bits = ct.c_void_p()
+                bmp = g.CreateDIBSection(mem, ct.addressof(hdr), 0, ct.byref(bits), None, 0)
+                if not bmp:
+                    continue
+                ct.memmove(bits, data, len(data))
+                old = g.SelectObject(mem, bmp)
+                u.UpdateLayeredWindow(hw, screen, ct.byref(self.POINT(x, y)), ct.byref(self.SIZE(r, r)), mem,
+                                      ct.byref(self.POINT(0, 0)), 0, ct.byref(blend), 2)
+                g.SelectObject(mem, old)
+                g.DeleteObject(bmp)
+        finally:
+            g.DeleteDC(mem)
+            u.ReleaseDC(None, screen)
+
+    def shape(self, r: int, edge: str, band, backdrop):
+        """band: flat colour just inside the rim (the inner glow while it pulses), or None to use
+        backdrop = (key, 2r x 2r RGB image): the card and its ambient light under the four corners."""
+        r = int(r or 0)
+        if r < 1:
+            return
+        self.r, self.quads = r, self._render(r, edge, band, backdrop)
+        self._push(True)
+
+    def sync(self):
+        """Follow the Tk window (moved, resized, faded)."""
+        self._push(False)
+
+    def set_alpha(self, a: float):
+        self.alpha = float(a)
+        self._push(False)
+
+    def show(self):
+        if not self.shown:
+            self.shown = True
+            self._push(True)
+            for hw in self.hw:
+                self.u.ShowWindow(hw, 4)  # SW_SHOWNOACTIVATE
+
+    def hide(self):
+        if self.shown:
+            self.shown = False
+            for hw in self.hw:
+                self.u.ShowWindow(hw, 0)
+
+    def destroy(self):
+        for hw in self.hw:
+            if self.u.IsWindow(hw):
+                self.u.DestroyWindow(hw)
+        self.hw = []
 
 
 class MemSettings:
@@ -378,6 +546,9 @@ class Widget:
         self.view = "now"           # now | settings (panel)
         self._idle_since = None
         self._sliders: dict = {}
+        self._glass = None                  # CornerGlass (Windows), made on first show
+        self._use_glass = sys.platform == "win32"
+        root.bind("<Configure>", lambda e: e.widget is root and self._glass and self._glass.sync(), add="+")
 
         self._build()
         self._place()
@@ -806,13 +977,17 @@ class Widget:
             c.coords(self.corner[i], x, y)
         x, y = getattr(self, "_xy", (self.root.winfo_x(), self.root.winfo_y()))
         self.root.geometry(f"{Wp}x{h}+{x}+{y}")
+        self._glass_shape()  # the bottom corners move over the ambient light
 
     def _set_shape(self, radius: int, edge: str):
         if (radius, edge) == (self._radius, self._edge):
             return
         self._radius, self._edge = radius, edge
-        for item, img in zip(self.corner, self.art.corners(radius, edge)):
+        masks = (self.art.corners(radius, edge, CornerGlass.INSET, ring=False) if self._use_glass
+                 else self.art.corners(radius, edge))
+        for item, img in zip(self.corner, masks):
             self.c.itemconfigure(item, image=img)
+        self._glass_shape()
         for line in (self.rim_l, self.rim_r, self.rim_b, self.rim_top):
             self._fill(line, edge)
         self._set_height(self.h)
@@ -837,7 +1012,7 @@ class Widget:
 
         def step(t):
             try:
-                self.root.attributes("-alpha", start + (to - start) * t)
+                self._set_alpha(start + (to - start) * t)
             except self.tk.TclError:
                 pass
         self._anim("alpha", dur, step, ease=ease_out, done=done)
@@ -850,11 +1025,69 @@ class Widget:
         self.root.deiconify()
         self.root.lift()
         self.root.attributes("-topmost", True)
+        self._glass_show()
         x, y = self._xy
         self.root.geometry(f"+{x}+{y - self.p(10)}")
         self._anim("slide", 0.28, lambda t: self.root.geometry(f"+{x}+{round(y - self.p(10) * (1 - t))}"))
         self._fade_window(self._alpha())
         self._level = -1
+
+    def _band(self):
+        """Colour of the outermost inner-glow ring when it shows (CornerGlass's band must match it)."""
+        a = (self._ring_k if self._rings else 0.0) * 0.8
+        return mix(CARD, self.cfg.get("rim_color") or AMBER, a) if a >= 0.09 else None
+
+    def _backdrop(self):
+        """(key, image): the card and its ambient light under the four corners, quadrants of a 2r square."""
+        r, Wp, h, p = self._radius, self.Wp, self.h, self.p
+        cap = self.mode == "cap"
+        gw, gh, kind = Wp, p(CAP_H) if cap else p(240), "cap" if cap else "pan"
+        spots = ((0, 0), (Wp - r, 0), (0, h - r), (Wp - r, h - r))
+        key = (kind, r, Wp, tuple(min(y, gh) for _, y in spots))
+        if getattr(self, "_bd", (None,))[0] != key:
+            art = self.art
+            ck = ("card_lit", gw, gh, kind, r)
+            lit = art._cache.get(ck)
+            if lit is None:
+                lit = art.I.new("RGBA", (gw, gh + r), art._rgba(CARD))
+                lit.alpha_composite(art.glow_pil(gw, gh, kind))
+                lit = art._cache[ck] = lit.convert("RGB")
+            img = art.I.new("RGB", (2 * r, 2 * r), _rgb(CARD))
+            for (x, y), q in zip(spots, ((0, 0), (r, 0), (0, r), (r, r))):
+                if y < gh:
+                    img.paste(lit.crop((x, y, x + r, y + r)), q)
+            self._bd = (key, img)
+        return self._bd
+
+    def _glass_shape(self):
+        if not self._glass or not self._radius:
+            return
+        band, bd = self._band(), self._backdrop()
+        key = (self._radius, self._edge, band or bd[0])
+        if key != getattr(self, "_glass_key", None):
+            self._glass_key = key
+            self._glass.shape(self._radius, self._edge or HAIR, band, bd)
+
+    def _set_alpha(self, a: float):
+        self.root.attributes("-alpha", a)
+        if self._glass:
+            self._glass.set_alpha(a)
+
+    def _glass_show(self):
+        if self._use_glass and not self._glass:
+            try:
+                self._glass = CornerGlass(self.root, self.art)
+                self._glass.alpha = float(self.root.attributes("-alpha"))
+                self._glass_key = None
+                self._glass_shape()
+            except Exception as e:
+                self.api.log(f"corner glass off: {e!r}")
+                self._glass, self._use_glass = None, False
+                r, edge, self._radius = self._radius, self._edge, None
+                if r:
+                    self._set_shape(r, edge or HAIR)
+        if self._glass:
+            self._glass.show()
 
     def _alpha(self) -> float:
         return float(self.cfg.get("opacity"))
@@ -865,6 +1098,8 @@ class Widget:
         def gone():
             if not self._visible:
                 self.root.withdraw()
+                if self._glass:
+                    self._glass.hide()
         self._fade_window(0.0, done=gone, dur=0.14)
 
     def _hide(self, secs):
@@ -880,6 +1115,8 @@ class Widget:
 
     def quit(self):
         self.vq.stop()
+        if self._glass:
+            self._glass.destroy()
         self.root.destroy()
 
     def toggle_mute(self):
@@ -1035,8 +1272,8 @@ class Widget:
             self.c.itemconfigure(self.orb, image=self.art.orb(k, dim=dim))
             rim = self.cfg.get("rim_color") or AMBER
             edge = mix(HAIR, rim, 0.25 + 0.75 * k) if speaking else HAIR
+            self._glow_rings(k if speaking else 0.0)  # first: the corner glass matches the ring colour
             self._set_shape(self._radius, edge)
-            self._glow_rings(k if speaking else 0.0)
         return speaking or self._scrub is not None
 
     def _draw_progress(self, frac, dur):
@@ -1630,7 +1867,7 @@ class Widget:
             self._built_alpha = self.cfg.get("opacity")
             if getattr(self, "_visible", False):
                 try:
-                    self.root.attributes("-alpha", self._alpha())
+                    self._set_alpha(self._alpha())
                 except self.tk.TclError:
                     pass
         first = not hasattr(self, "_started")
@@ -1958,7 +2195,7 @@ class Widget:
             return
         if key == "opacity" and self._visible:
             try:
-                self.root.attributes("-alpha", float(value))
+                self._set_alpha(float(value))
             except self.tk.TclError:
                 pass
         self._layout_key = None
@@ -1972,13 +2209,13 @@ class Widget:
 
         def step(t):
             k = abs(math.sin(2 * math.pi * t))
-            self._set_shape(self._radius, mix(HAIR, rim, 0.25 + 0.75 * k))
             self._glow_rings(k)
+            self._set_shape(self._radius, mix(HAIR, rim, 0.25 + 0.75 * k))
 
         def done():
             self._level = -1  # the live loop redraws the real state
-            self._set_shape(self._radius, HAIR)
             self._glow_rings(0.0)
+            self._set_shape(self._radius, HAIR)
             self._kick()
         self._anim("rimpreview", 1.4, step, ease=lambda t: t, done=done)
 
@@ -2260,7 +2497,7 @@ class Widget:
             self.root.after(10, self._rebuild)
             return
         try:
-            self.root.attributes("-alpha", self._alpha())
+            self._set_alpha(self._alpha())
         except self.tk.TclError:
             pass
         self._layout_key = None
