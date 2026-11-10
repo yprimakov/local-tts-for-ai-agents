@@ -30,9 +30,35 @@ _HERE = Path(__file__).resolve().parent
 
 KEY = "#020203"  # window transparency key: never used for anything drawn
 CARD, CARD_HI, HOVER, HAIR = "#121214", "#1a1a1d", "#1d1d21", "#29292e"
-FG, BODY, MUTED, FAINT = "#f7f7f7", "#e2e2e6", "#8e8f92", "#5f6066"
+FG, BODY, MUTED, FAINT = "#f7f7f7", "#e2e2e6", "#8e8f92", "#7c7d83"
 AMBER, EMBER, BRONZE, COOLED = "#F59E0B", "#FBBF24", "#D97706", "#EA580C"
 OBSIDIAN = "#0b0b0d"
+INK = (255, 255, 255)                          # faint outlines and hover washes are this colour at low alpha
+GLOW_WARM, GLOW_COOL = (245, 158, 11), (20, 184, 166)  # the card's ambient light
+ORB_GLASS = (32, 27, 22)                       # the idle orb's dark glass
+
+# Themes set the card, text, hairline and ambient light. The pulse colour is its own setting.
+# EMBER doubles as accent text (values, eyebrows), so a light theme darkens it. Faint text is >= 4.5:1.
+THEMES = {
+    "ember": dict(CARD="#121214", CARD_HI="#1a1a1d", HOVER="#1d1d21", HAIR="#29292e", FG="#f7f7f7",
+                  BODY="#e2e2e6", MUTED="#8e8f92", FAINT="#7c7d83", EMBER="#FBBF24", INK=(255, 255, 255),
+                  GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(32, 27, 22)),
+    "graphite": dict(CARD="#161616", CARD_HI="#1f1f1f", HOVER="#242424", HAIR="#2e2e2e", FG="#fafafa",
+                     BODY="#e5e5e5", MUTED="#a3a3a3", FAINT="#8a8a8a", EMBER="#f5f5f5", INK=(255, 255, 255),
+                     GLOW_WARM=(255, 255, 255), GLOW_COOL=(160, 160, 160), ORB_GLASS=(30, 30, 30)),
+    "midnight": dict(CARD="#0d1424", CARD_HI="#131c30", HOVER="#18223a", HAIR="#23304a", FG="#f1f5f9",
+                     BODY="#dbe4f0", MUTED="#94a3b8", FAINT="#7d8aa0", EMBER="#93c5fd", INK=(255, 255, 255),
+                     GLOW_WARM=(59, 130, 246), GLOW_COOL=(14, 165, 233), ORB_GLASS=(17, 26, 46)),
+    "daylight": dict(CARD="#f9f5ea", CARD_HI="#fffdf7", HOVER="#f1ebdc", HAIR="#e3dccb", FG="#1c1917",
+                     BODY="#36302a", MUTED="#5c564f", FAINT="#6b645c", EMBER="#a1520a", INK=(60, 40, 10),
+                     GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(255, 250, 238)),
+}
+THEME_NAMES = {"ember": "Ember", "graphite": "Graphite", "midnight": "Midnight", "daylight": "Daylight"}
+
+
+def apply_theme(name: str) -> None:
+    """Point the colour names at a theme. Everything reads them when it draws, so a rebuild repaints all."""
+    globals().update(THEMES.get(name) or THEMES["ember"])
 EDGE_HOT = "#8a5410"  # rim colour at the top of a breath
 
 W = 384           # logical px
@@ -49,7 +75,7 @@ GLYPHS = {  # Segoe Fluent Icons on Windows, plain symbols elsewhere
     "volume": ("", "♪"), "mute": ("", "✕"), "down": ("", "⌄"),
     "up": ("", "⌃"), "close": ("", "✕"), "send": ("", "➤"),
     "left": ("", "‹"), "right": ("", "›"),
-    "gear": ("\ue713", "\u2699"),
+    "gear": ("\ue713", "\u2699"), "mini": ("\ue921", "\u2013"),
 }
 STATUS_TAGS = {"not spoken: headless run": "background", "not spoken: muted": "muted",
                "not spoken: project muted": "project muted", "not spoken: do not disturb": "do not disturb",
@@ -62,6 +88,10 @@ BACKGROUND = ("not spoken: headless run", "not spoken: grouped", "not spoken: no
 def _rgb(c: str) -> tuple[int, int, int]:
     c = c.lstrip("#")
     return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
+def _hex(rgb) -> str:
+    return "#%02x%02x%02x" % tuple(rgb)
 
 
 def mix(a: str, b: str, t: float) -> str:
@@ -136,6 +166,13 @@ class Art:
 
     # the ember orb, at a glow level 0..1; dim = idle
     def orb(self, level: float, dim: bool = False):
+        return self.get(("orb", round(level, 3), dim), lambda: self.orb_pil(level, dim))
+
+    def orb_pil(self, level: float, dim: bool = False):
+        key = ("orb_pil", round(level, 3), dim)
+        if key in self._cache:
+            return self._cache[key]
+
         def make():
             I, D, F, SS = self.I, self.D, self.F, self.SS
             d, g = self.p(ORB), self.p(18)
@@ -148,7 +185,7 @@ class Art:
                 dr = D.Draw(ball)
                 dr.ellipse((0, 0, n - 1, n - 1), fill=(245, 158, 11, 130))
                 k = int(SS * 1.5)
-                dr.ellipse((k, k, n - 1 - k, n - 1 - k), fill=(32, 27, 22, 255))
+                dr.ellipse((k, k, n - 1 - k, n - 1 - k), fill=(*ORB_GLASS, 255))
                 out.alpha_composite(self._down(ball, d, d), (g, g))
                 return out
             a = int(70 + 120 * level)
@@ -174,7 +211,8 @@ class Art:
                 dr.ellipse((x - r, y - r, x + r, y + r), fill=(*col, 255))
             out.alpha_composite(self._down(ball, d, d), (g, g))
             return out
-        return self.get(("orb", round(level, 3), dim), make)
+        self._cache[key] = make()
+        return self._cache[key]
 
     def knob(self):
         def make():
@@ -187,7 +225,7 @@ class Art:
             out.alpha_composite(halo.filter(F.GaussianBlur(g / 2)))
             n = d * self.SS
             ball = I.new("RGBA", (n, n), (0, 0, 0, 0))
-            D.Draw(ball).ellipse((0, 0, n - 1, n - 1), fill=self._rgba(EMBER))
+            D.Draw(ball).ellipse((0, 0, n - 1, n - 1), fill=self._rgba("#FBBF24"))
             out.alpha_composite(self._down(ball, d, d), (g, g))
             return out
         return self.get("knob", make)
@@ -258,15 +296,64 @@ class Art:
             self._cache[key] = [self.TK.PhotoImage(c) for c in make_all()]
         return self._cache[key]
 
+    def theme_card(self, w: int, h: int, t: dict, chosen: bool):
+        """A theme swatch: its card colour lit by its ambient light, a text line, a ring when chosen."""
+        def make():
+            I, D, F, SS = self.I, self.D, self.F, self.SS
+            n_w, n_h, r = w * SS, h * SS, self.p(10) * SS
+            body = I.new("RGBA", (n_w, n_h), self._rgba(t["CARD"]))
+            light = I.new("RGBA", (n_w, n_h), (0, 0, 0, 0))
+            D.Draw(light).ellipse((n_w * 0.45, -n_h * 0.9, n_w * 1.4, n_h * 0.9), fill=(*t["GLOW_WARM"], 90))
+            body.alpha_composite(light.filter(F.GaussianBlur(n_h / 3)))
+            D.Draw(body).rounded_rectangle((self.p(10) * SS, self.p(10) * SS, n_w * 0.55, self.p(14) * SS),
+                                           radius=self.p(2) * SS, fill=self._rgba(t["MUTED"]))
+            mask = I.new("L", (n_w, n_h), 0)
+            D.Draw(mask).rounded_rectangle((0, 0, n_w - 1, n_h - 1), radius=r, fill=255)
+            im = I.new("RGBA", (n_w, n_h), (0, 0, 0, 0))
+            im.paste(body, (0, 0), mask)
+            ring = I.new("L", (n_w, n_h), 0)
+            k = SS * (2 if chosen else 1)
+            D.Draw(ring).rounded_rectangle((0, 0, n_w - 1, n_h - 1), radius=r, fill=255)
+            D.Draw(ring).rounded_rectangle((k, k, n_w - 1 - k, n_h - 1 - k), radius=r - k, fill=0)
+            im.paste(I.new("RGBA", (n_w, n_h), self._rgba(AMBER if chosen else t["HAIR"])), (0, 0), ring)
+            return self._down(im, w, h)
+        return self.get(("theme_card", w, h, tuple(sorted((k, str(v)) for k, v in t.items())), chosen), make)
+
+    def glow_corners(self, s: int, r: int, step: int, cols: tuple):
+        """Four corner images (s x s device px) of the inner glow rings: ring i fills the band between the
+        rounded rectangles inset 1 + i*step and 1 + (i+1)*step (radius r minus the inset); None = no ring."""
+        key = ("glowc", s, r, step, cols)
+        if key not in self._cache:
+            old = [k for k in self._cache if isinstance(k, tuple) and k[0] == "glowc"]
+            if len(old) > 120:
+                for k in old:
+                    del self._cache[k]
+            I, D, SS = self.I, self.D, self.SS
+            n, big = s * SS, 4 * s * SS
+            im = I.new("RGBA", (n, n), (0, 0, 0, 0))
+            dr = D.Draw(im)
+            last = max((i for i, col in enumerate(cols) if col), default=-1)
+            for i in range(last + 2):
+                ins = (1 + i * step) * SS
+                rad = max(0, r * SS - ins)
+                fill = self._rgba(cols[i]) if i <= last and cols[i] else (0, 0, 0, 0)
+                dr.rounded_rectangle((ins, ins, big, big), radius=rad, fill=fill)
+            tl = self._down(im, s, s)
+            T = I.Transpose
+            self._cache[key] = [self.TK.PhotoImage(x) for x in
+                                (tl, tl.transpose(T.FLIP_LEFT_RIGHT), tl.transpose(T.FLIP_TOP_BOTTOM),
+                                 tl.transpose(T.ROTATE_180))]
+        return self._cache[key]
+
     def glow(self, w: int, h: int, kind: str):
         """Ambient light inside the card: amber from one side, a faint teal backlight, the Forge hairline on top."""
         def make():
             I, D, F = self.I, self.D, self.F
             im = I.new("RGBA", (w, h), (0, 0, 0, 0))
-            lights = ([(w - self.p(70), h + self.p(10), self.p(150), (245, 158, 11, 46)),
-                       (self.p(20), -self.p(20), self.p(120), (20, 184, 166, 16))] if kind == "cap" else
-                      [(w - self.p(40), -self.p(50), self.p(190), (245, 158, 11, 44)),
-                       (self.p(10), self.p(40), self.p(150), (20, 184, 166, 12))])
+            lights = ([(w - self.p(70), h + self.p(10), self.p(150), (*GLOW_WARM, 46)),
+                       (self.p(20), -self.p(20), self.p(120), (*GLOW_COOL, 16))] if kind == "cap" else
+                      [(w - self.p(40), -self.p(50), self.p(190), (*GLOW_WARM, 44)),
+                       (self.p(10), self.p(40), self.p(150), (*GLOW_COOL, 12))])
             for x, y, r, col in lights:
                 layer = I.new("RGBA", (w, h), (0, 0, 0, 0))
                 D.Draw(layer).ellipse((x - r, y - r, x + r, y + r), fill=col)
@@ -276,7 +363,7 @@ class Art:
             for x in range(w):
                 t = x / max(1, w - 1)
                 a = max(0.0, 1 - abs(t - 0.58) / 0.42) ** 1.6
-                px[x, 0] = (245, 158, 11, int(185 * a))
+                px[x, 0] = (*GLOW_WARM, int(185 * a))
             im.alpha_composite(line, (0, 0))
             return im
         self._cache[("glow_make", w, h, kind)] = make
@@ -302,7 +389,7 @@ class CornerGlass:
     INSET = 1.0   # px the Tk window's binary curve sits inside the true one (so the glass covers it)
     FADE = 1.0    # px over which the card band fades out, after staying solid to INSET + 0.5 px
 
-    def __init__(self, root, art):
+    def __init__(self, root, art, count: int = 4):
         import ctypes
         from ctypes import wintypes as W
         self.ct, self.art = ctypes, art
@@ -335,7 +422,7 @@ class CornerGlass:
         # LAYERED | TRANSPARENT (click-through) | TOOLWINDOW | NOACTIVATE | TOPMOST
         ex = 0x80000 | 0x20 | 0x80 | 0x08000000 | 0x8
         self.hw = [u.CreateWindowExW(ex, "Static", None, 0x80000000, 0, 0, 1, 1, self.owner, None, None, None)
-                   for _ in range(4)]
+                   for _ in range(count)]
         if not all(self.hw):
             raise OSError("CreateWindowExW failed")
         self.r, self.quads, self.alpha, self.shown = 0, None, 0.0, False
@@ -386,18 +473,28 @@ class CornerGlass:
                 u.UpdateLayeredWindow(hw, None, ct.byref(self.POINT(x, y)), None, None, None, 0,
                                       ct.byref(blend), 2)
             return
+        self._blit([(hw, x, y, r, r, data) for hw, (x, y), data in zip(self.hw, self._spots(), self.quads)])
+
+    def blit(self, i: int, x: int, y: int, w: int, h: int, data: bytes, alpha: float = 1.0):
+        """Show premultiplied BGRA pixels (w x h) in window i at screen x, y."""
+        self.alpha = alpha
+        self._blit([(self.hw[i], x, y, w, h, data)])
+
+    def _blit(self, items):
+        ct, u, g = self.ct, self.u, self.g
+        blend = self.BLEND(0, 0, max(0, min(255, round(255 * self.alpha))), 1)  # AC_SRC_ALPHA
         screen = u.GetDC(None)
         mem = g.CreateCompatibleDC(screen)
-        hdr = (ct.c_uint32 * 11)(40, r, (-r) & 0xFFFFFFFF, 1 | (32 << 16), 0, 0, 0, 0, 0, 0, 0)  # BITMAPINFOHEADER
         try:
-            for hw, (x, y), data in zip(self.hw, self._spots(), self.quads):
+            for hw, x, y, w, h, data in items:
+                hdr = (ct.c_uint32 * 11)(40, w, (-h) & 0xFFFFFFFF, 1 | (32 << 16), 0, 0, 0, 0, 0, 0, 0)
                 bits = ct.c_void_p()
                 bmp = g.CreateDIBSection(mem, ct.addressof(hdr), 0, ct.byref(bits), None, 0)
                 if not bmp:
                     continue
                 ct.memmove(bits, data, len(data))
                 old = g.SelectObject(mem, bmp)
-                u.UpdateLayeredWindow(hw, screen, ct.byref(self.POINT(x, y)), ct.byref(self.SIZE(r, r)), mem,
+                u.UpdateLayeredWindow(hw, screen, ct.byref(self.POINT(x, y)), ct.byref(self.SIZE(w, h)), mem,
                                       ct.byref(self.POINT(0, 0)), 0, ct.byref(blend), 2)
                 g.SelectObject(mem, old)
                 g.DeleteObject(bmp)
@@ -442,6 +539,122 @@ class CornerGlass:
         self.hw = []
 
 
+class MiniOrb:
+    """The minimized player: a small ember orb where the player's orb was. It pulses while speaking and
+    shows how many calls wait. Click restores the player; drag moves the orb.
+    On Windows the Tk window only gives the click area (a binary disk); a layered window draws the
+    antialiased orb, its glow and the badge on top, so the edge is smooth."""
+    BALL = 40  # logical px
+
+    def __init__(self, w, cx: int, cy: int):
+        self.w, tk = w, w.tk
+        self.scale = self.BALL / ORB
+        full = w.art.orb_pil(0, dim=True)
+        self.size = round(full.width * self.scale)
+        self.ball = round(w.p(ORB) * self.scale)
+        self.cx, self.cy = cx, cy
+        self.state = None
+        t = self.top = tk.Toplevel(w.root)
+        t.overrideredirect(True)
+        t.attributes("-topmost", True)
+        try:
+            t.attributes("-transparentcolor", KEY)
+        except tk.TclError:
+            pass
+        t.configure(bg=KEY)
+        c = self.c = tk.Canvas(t, width=self.size, height=self.size, bg=KEY, highlightthickness=0, bd=0)
+        c.place(x=0, y=0)
+        m = (self.size - self.ball) // 2
+        self.disk = c.create_oval(m + 1, m + 1, m + self.ball - 1, m + self.ball - 1, fill=_hex(ORB_GLASS), width=0)
+        self.img = c.create_image(0, 0, anchor="nw")
+        c.configure(cursor="hand2")
+        c.bind("<ButtonPress-1>", self._press)
+        c.bind("<B1-Motion>", self._move)
+        c.bind("<ButtonRelease-1>", self._release)
+        c.bind("<Button-3>", w._menu)
+        self.glass = None
+        if sys.platform == "win32":
+            try:
+                t.update_idletasks()
+                self.glass = CornerGlass(t, w.art, count=1)
+            except Exception as e:
+                w.api.log(f"mini orb glass off: {e!r}")
+        self._place()
+        t.deiconify()
+        if self.glass:
+            self.glass.u.ShowWindow(self.glass.hw[0], 4)
+
+    def _xy(self):
+        return self.cx - self.size // 2, self.cy - self.size // 2
+
+    def _place(self):
+        x, y = self._xy()
+        self.top.geometry(f"{self.size}x{self.size}+{x}+{y}")
+        self._paint(force=True)
+
+    def render(self, k: float, dim: bool, calls: int):
+        state = (round(k, 3), dim, calls)
+        if state != self.state:
+            self.state = state
+            self._paint()
+
+    def _paint(self, force=False):
+        if not self.state:
+            self.state = (0, True, 0)
+        k, dim, calls = self.state
+        w = self.w
+        im = w.art.orb_pil(k, dim=dim).resize((self.size, self.size), w.art.I.LANCZOS)
+        if calls:
+            I, D = w.art.I, w.art.D
+            SS = 4
+            bd = round(self.size * 0.36)
+            b = I.new("RGBA", (bd * SS, bd * SS), (0, 0, 0, 0))
+            dr = D.Draw(b)
+            dr.ellipse((0, 0, bd * SS - 1, bd * SS - 1), fill=Art._rgba(AMBER))
+            try:
+                from PIL import ImageFont
+                font = ImageFont.truetype(str(_HERE / "fonts" / "VQJetBrainsMono.ttf"), int(bd * SS * 0.62))
+            except Exception:
+                font = None
+            dr.text((bd * SS / 2, bd * SS / 2), str(min(calls, 9)), fill=Art._rgba(OBSIDIAN), font=font, anchor="mm")
+            b = b.resize((bd, bd), I.LANCZOS)
+            im.alpha_composite(b, (self.size - bd - round(self.size * 0.12), round(self.size * 0.12)))
+        if self.glass:
+            pm = im.convert("RGBa")
+            rr, gg, bb, aa = pm.split()
+            x, y = self._xy()
+            self.glass.blit(0, x, y, self.size, self.size, w.art.I.merge("RGBa", (bb, gg, rr, aa)).tobytes(),
+                            alpha=1.0)
+            self.c.itemconfigure(self.img, state="hidden")
+        else:
+            self._photo = w.art.TK.PhotoImage(im)
+            self.c.itemconfigure(self.img, image=self._photo)
+
+    def _press(self, e):
+        self._down = (e.x_root, e.y_root, self.cx, self.cy)
+        self._moved = False
+
+    def _move(self, e):
+        x0, y0, cx, cy = self._down
+        if abs(e.x_root - x0) + abs(e.y_root - y0) > 4:
+            self._moved = True
+        if self._moved:
+            self.cx, self.cy = cx + e.x_root - x0, cy + e.y_root - y0
+            self._place()
+
+    def _release(self, e):
+        if not getattr(self, "_moved", False):
+            self.w.restore()
+
+    def destroy(self):
+        if self.glass:
+            self.glass.destroy()
+        try:
+            self.top.destroy()
+        except Exception:
+            pass
+
+
 class MemSettings:
     """Stand-in when the queue has no settings store (tests, harness)."""
     def __init__(self):
@@ -449,7 +662,8 @@ class MemSettings:
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
                    "say_source": True, "speak_background": False, "auto_open_calls": True,
                    "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send",
-                   "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12}
+                   "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12,
+                   "player_width": 1.0, "theme": "ember", "minimized": False}
 
     def get(self, k):
         return self._v[k]
@@ -467,6 +681,7 @@ class MemSettings:
 
 RIM_NAMES = {"#F59E0B": "Promethean Amber", "#EA580C": "Cooled Ember", "#FBBF24": "Ember Light",
              "#F43F5E": "Rose", "#8B5CF6": "Violet", "#3B82F6": "Blue", "#14B8A6": "Teal", "#E5E7EB": "White"}
+WIDTH_NAMES = {0.85: "Narrow", 1.0: "Default", 1.2: "Wide", 1.4: "Wider"}
 SIZE_NAMES = {0.85: "Small", 1.0: "Default", 1.15: "Large", 1.3: "Larger", 1.5: "Largest"}
 VOICE_NAMES = {"af_heart": "Heart", "af_bella": "Bella", "af_nicole": "Nicole", "af_sarah": "Sarah",
                "am_michael": "Michael", "am_adam": "Adam", "bf_emma": "Emma \u00b7 UK", "bm_george": "George \u00b7 UK"}
@@ -489,7 +704,11 @@ class Widget:
         self.root = root = tk.Tk()
         root.report_callback_exception = lambda *exc: api.log(
             "player error: " + "".join(__import__("traceback").format_exception(*exc))[-1500:])
-        root.title("Voice queue")
+        root.title("Ember Voice Player")
+        try:
+            root.iconbitmap(default=str(Path(__file__).with_name("assets") / "ember-voice.ico"))
+        except Exception:
+            pass
         self.cfg = getattr(vq, "settings", None) or MemSettings()
         self.S0 = max(1.0, root.winfo_fpixels("1i") / 96)
         self._fams = set(tkfont.families(root))
@@ -525,7 +744,8 @@ class Widget:
         self._shown = None
         self._prog = (0.0, 0.0, 0.0, False)  # pos, dur, wall clock, running
         self._env_k = 0.0                       # smoothed voice loudness for the pulse
-        self._rings: list[int] = []             # inner glow rings
+        self._rings: list[list[int]] = []       # inner glow rings: four straight lines each
+        self._ring_corner: list[int] = []       # and four antialiased corner images
         self._ring_k = 0.0
         self._scrub = None
         self._level = -1
@@ -547,6 +767,7 @@ class Widget:
         self._idle_since = None
         self._sliders: dict = {}
         self._glass = None                  # CornerGlass (Windows), made on first show
+        self._mini = None                   # MiniOrb while minimized
         self._use_glass = sys.platform == "win32"
         root.bind("<Configure>", lambda e: e.widget is root and self._glass and self._glass.sync(), add="+")
 
@@ -555,11 +776,16 @@ class Widget:
         self._apply_mode(instant=True)
         self._tick()
 
+    def _look(self):
+        """The settings that need a full redraw when they change."""
+        return (self.cfg.get("text_size"), self.cfg.get("player_width"), self.cfg.get("theme"))
+
     def _scale_setup(self):
         """Sizes and fonts for the current text size setting (all of the player scales with it)."""
-        self._built_size = self.cfg.get("text_size")
-        self.S = self.S0 * float(self._built_size)
-        self.Wp = self.p(W)
+        self._built_size = self._look()
+        apply_theme(self.cfg.get("theme"))
+        self.S = self.S0 * float(self.cfg.get("text_size"))
+        self.Wp = self.p(W * float(self.cfg.get("player_width") or 1.0))
         self.art = Art(self.S)
         fams, tkfont, root = self._fams, self._tkfont, self.root
 
@@ -598,10 +824,21 @@ class Widget:
         x, y = self._xy
         self._xy = (x + old_w - self.Wp, y)
         self._texts, self._fills, self.chips = {}, {}, []
+        self._rings, self._ring_corner = [], []
         self._layout_key, self._radius, self._edge, self._level = None, None, None, -1
         self.h = self._target_h = self.p(CAP_H)
         self._build()
         self._apply_mode(instant=True)
+        if not self._on_screen():
+            self._reset_position()
+        if self._mini:
+            cx, cy = self._mini.cx, self._mini.cy
+            self._mini.destroy()
+            self._mini = MiniOrb(self, cx, cy)
+        if self._glass:
+            self._glass._cache.clear()
+            self._glass_key = None
+            self._glass_shape()
 
     # ---------------------------------------------------------- tiny utils
     def p(self, n: float) -> int:
@@ -715,6 +952,7 @@ class Widget:
         for name, glyph, cmd, tip in (
                 ("close", "close", self.hide_until_next, "Hide until the next voiceover (Esc)"),
                 ("size", "down", self._toggle_mode, lambda: "Smaller" if self.mode == "panel" else "Open the panel"),
+                ("mini", "mini", self.minimize, "Minimize to an orb"),
                 ("mute", "volume", self.toggle_mute, lambda: "Unmute" if self.vq.muted else
                  "Mute: new replies go to history only (M)"),
                 ("gear", "gear", self._toggle_settings, lambda: "Back" if self.view == "settings" else "Settings")):
@@ -748,15 +986,15 @@ class Widget:
         c.tag_bind("bar", "<ButtonRelease-1>", self._scrub_end)
         c.tag_bind("bar", "<Enter>", lambda e: c.configure(cursor="hand2"))
         c.tag_bind("bar", "<Leave>", lambda e: c.configure(cursor=""))
-        self.skip_bg = c.create_image(0, 0, image=self.art.circle(34, outline=(255, 255, 255, 36)),
+        self.skip_bg = c.create_image(0, 0, image=self.art.circle(34, outline=(*INK, 36)),
                                       tags=("pan", "play", "skip"))
         self.skip_g = c.create_text(0, 0, text=self.glyph("next"), font=self.F["icon"], fill=FG,
                                     tags=("pan", "play", "skip"))
         c.tag_bind("skip", "<Button-1>", lambda e: self.vq.skip())
         c.tag_bind("skip", "<Enter>", lambda e: (c.itemconfigure(self.skip_bg, image=self.art.circle(
-            34, fill=(255, 255, 255, 16), outline=(255, 255, 255, 60))), c.configure(cursor="hand2")))
+            34, fill=(*INK, 16), outline=(*INK, 60))), c.configure(cursor="hand2")))
         c.tag_bind("skip", "<Leave>", lambda e: (c.itemconfigure(self.skip_bg, image=self.art.circle(
-            34, outline=(255, 255, 255, 36))), c.configure(cursor="")))
+            34, outline=(*INK, 36))), c.configure(cursor="")))
         self._tipify("skip", lambda: "Skip to the next one (Right arrow)")
         self.times = c.create_text(0, 0, anchor="w", text="", font=self.F["mono"], fill=FAINT, tags=("pan", "play"))
         self.next_t = c.create_text(0, 0, anchor="e", text="", font=self.F["meta"], fill=MUTED, tags=("pan", "play"))
@@ -857,7 +1095,7 @@ class Widget:
 
     def _icon_button(self, name, glyph, cmd, tip):
         c, tag = self.c, f"btn_{name}"
-        bg = c.create_image(0, 0, image=self.art.circle(30, fill=(255, 255, 255, 16)), state="hidden", tags=(tag,))
+        bg = c.create_image(0, 0, image=self.art.circle(30, fill=(*INK, 16)), state="hidden", tags=(tag,))
         g = c.create_text(0, 0, text=self.glyph(glyph), font=self.F["icon"], fill=MUTED, tags=(tag,))
         c.tag_bind(tag, "<Button-1>", lambda e: cmd())
 
@@ -899,7 +1137,7 @@ class Widget:
         t.overrideredirect(True)
         t.attributes("-topmost", True)
         t.configure(bg=HAIR)
-        tk.Label(t, text=text, bg="#1c1c20", fg=BODY, font=self.F["meta"], padx=self.p(8), pady=self.p(4)).pack(
+        tk.Label(t, text=text, bg=CARD_HI, fg=BODY, font=self.F["meta"], padx=self.p(8), pady=self.p(4)).pack(
             padx=1, pady=1)
         t.update_idletasks()
         tx = min(x - t.winfo_reqwidth() // 2, self.root.winfo_screenwidth() - t.winfo_reqwidth() - self.p(8))
@@ -927,39 +1165,47 @@ class Widget:
         self._xy = (x, y)
         self.root.geometry(f"+{x}+{y}")
 
-    # inner glow: rounded rings inside the rim, fading inwards, in the pulse colour
-    @staticmethod
-    def _rr_points(x0, y0, x1, y1, r):
-        r = max(1.0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
-        pts = []
-        for cx, cy, a0 in ((x1 - r, y0 + r, -90), (x1 - r, y1 - r, 0), (x0 + r, y1 - r, 90), (x0 + r, y0 + r, 180)):
-            for k in range(7):
-                a = math.radians(a0 + 15 * k)
-                pts += [cx + r * math.cos(a), cy + r * math.sin(a)]
-        return pts + pts[:2]
-
     def _glow_rings(self, k: float, recolor=True):
+        """Inner glow: rings inside the rim in the pulse colour, fading inwards. Straight parts are Tk lines
+        (not jagged); the four corners are antialiased images that end exactly where the lines start."""
         c, p = self.c, self.p
         size = p(int(self.cfg.get("glow_size") or 0))
         step = max(1, p(2))
         n = size // step if size else 0
         while len(self._rings) < n:
-            self._rings.append(c.create_line(0, 0, 0, 0, width=step, fill=CARD, state="hidden", tags=("bg", "ring")))
+            self._rings.append([c.create_line(0, 0, 0, 0, width=step, fill=CARD, state="hidden", tags=("bg", "ring"))
+                                for _ in range(4)])
         while len(self._rings) > n:
-            c.delete(self._rings.pop())
+            for ln in self._rings.pop():
+                c.delete(ln)
+        if not self._ring_corner:
+            self._ring_corner = [c.create_image(0, 0, anchor="nw", state="hidden", tags=("bg", "ring"))
+                                 for _ in range(4)]
         self._ring_k = k
         if not n or k <= 0.01:
             c.itemconfigure("ring", state="hidden")
             return
         rim = self.cfg.get("rim_color") or AMBER
         r, w, h = self._radius or 0, self.Wp, self.h
-        for i, ln in enumerate(self._rings):
-            inset = 1 + i * step + step / 2
-            c.coords(ln, *self._rr_points(inset, inset, w - 1 - inset, h - 1 - inset, r - inset))
-            if recolor:
-                a = k * 0.8 * (1 - i / n) ** 1.7
-                # a faint ring would be darker than the card's ambient light behind it: leave it out
-                c.itemconfigure(ln, fill=mix(CARD, rim, a), state="disabled" if a >= 0.09 else "hidden")
+        if recolor or not getattr(self, "_ring_cols", None):
+            # a faint ring would be darker than the card's ambient light behind it: leave it out
+            self._ring_cols = [mix(CARD, rim, a) if a >= 0.09 else None
+                               for a in (k * 0.8 * (1 - i / n) ** 1.7 for i in range(n))]
+        cols = self._ring_cols
+        s = min(max(r, 1 + n * step), w // 2, h // 2)  # corner square: the whole curve of every ring
+        for i, lines in enumerate(self._rings):
+            y = 1 + i * step + step / 2
+            for ln, xy in zip(lines, ((s, y, w - s, y), (s, h - 1 - y, w - s, h - 1 - y),
+                                      (y, s, y, h - s), (w - 1 - y, s, w - 1 - y, h - s))):
+                c.coords(ln, *xy)
+                if cols[i]:
+                    c.itemconfigure(ln, fill=cols[i], state="disabled")
+                else:
+                    c.itemconfigure(ln, state="hidden")
+        imgs = self.art.glow_corners(s, r, step, tuple(cols))
+        for item, img, xy in zip(self._ring_corner, imgs, ((0, 0), (w - s, 0), (0, h - s), (w - s, h - s))):
+            c.coords(item, *xy)
+            c.itemconfigure(item, image=img, state="disabled")
         c.tag_raise("ring", self.glow_pan)
 
     def _set_height(self, h: int):
@@ -1019,6 +1265,10 @@ class Widget:
 
     def show(self):
         self.hidden_until, self.hidden_for_next = 0.0, None
+        if self.cfg.get("minimized"):
+            if not self._mini:
+                self.minimize()
+            return
         if self._visible:
             return
         self._visible = True
@@ -1089,9 +1339,45 @@ class Widget:
         if self._glass:
             self._glass.show()
 
+    def _orb_offset(self):
+        """Where the orb's centre sits inside the player, in device px."""
+        p = self.p
+        return (p(9 + ORB / 2), p(CAP_H / 2)) if self.mode == "cap" else (p(PAD + ORB / 2), p(PAD + ORB / 2))
+
+    def minimize(self):
+        """Shrink to a small ember orb where the player's orb is (kept across restarts)."""
+        self.cfg.update(minimized=True)
+        if self._mini:
+            return
+        ox, oy = self._orb_offset()
+        x, y = self._xy
+        self._tip_hide()
+        if self._visible:
+            self._withdraw()
+        else:
+            self.root.withdraw()
+        self._mini = MiniOrb(self, x + ox, y + oy)
+        self._mini.render(0, not (self._cur or self._q), len(self._calls))
+        self._kick()
+
+    def restore(self):
+        """Back from the orb to the player, which moves so its orb lands where the small orb was."""
+        self.cfg.update(minimized=False)
+        if self._mini:
+            ox, oy = self._orb_offset()
+            self._xy = (self._mini.cx - ox, self._mini.cy - oy)
+            self._mini.destroy()
+            self._mini = None
+            if not self._on_screen():
+                self._reset_position()
+        self.show()
+
     def summon(self):
         """Bring the player back for sure (the "Voice player" shortcut, POST /show): onto a visible screen,
         un-hidden, and redrawn from scratch in case the window lost its picture."""
+        if self.cfg.get("minimized") or self._mini:
+            self.restore()
+            return
         if not self._on_screen():
             self._reset_position()
         if self._visible:
@@ -1148,6 +1434,8 @@ class Widget:
         self.vq.stop()
         if self._glass:
             self._glass.destroy()
+        if self._mini:
+            self._mini.destroy()
         self.root.destroy()
 
     def toggle_mute(self):
@@ -1160,6 +1448,10 @@ class Widget:
 
     def _menu(self, e):
         m = self.tk.Menu(self.root, tearoff=0)
+        if self._mini:
+            m.add_command(label="Restore the player", command=self.restore)
+        else:
+            m.add_command(label="Minimize to an orb", command=self.minimize)
         m.add_command(label="Hide until the next voiceover", command=self.hide_until_next)
         m.add_command(label="Hide for 1 hour", command=lambda: self._hide(3600))
         proj = (self._shown or {}).get("project")
@@ -1232,11 +1524,11 @@ class Widget:
     def _place_buttons(self):
         p, Wp, c = self.p, self.Wp, self.c
         y = p(CAP_H / 2) if self.mode == "cap" else p(PAD + ORB / 2)
-        names = ("close", "size") if self.mode == "cap" else ("close", "size", "mute", "gear")
-        for i, name in enumerate(("close", "size", "mute", "gear")):
+        names = ("close", "size") if self.mode == "cap" else ("close", "size", "mini", "mute", "gear")
+        for name in ("close", "size", "mini", "mute", "gear"):
             b = self.btn[name]
             if name in names:
-                x = Wp - p(12 if self.mode == "cap" else 10) - p(15) - i * p(31)
+                x = Wp - p(12 if self.mode == "cap" else 10) - p(15) - names.index(name) * p(31)
                 c.coords(b["bg"], x, y)
                 c.coords(b["g"], x, y)
                 c.itemconfigure(b["g"], state="normal")
@@ -1273,7 +1565,8 @@ class Widget:
         self.c.configure(cursor="hand2" if on else "")
 
     def _live(self, now: float) -> bool:
-        if not self._visible:
+        mini = self._mini if not self._visible else None
+        if not self._visible and not mini:
             return False
         pos, dur, wall, running = self._prog
         speaking = running and self._cur is not None
@@ -1282,7 +1575,8 @@ class Widget:
             frac = min(1.0, max(0.0, cur_pos / dur))
             if self._scrub is not None:
                 frac = self._scrub
-            self._draw_progress(frac, dur)
+            if not mini:
+                self._draw_progress(frac, dur)
         # ember: orb glow and the card's rim pulse with the voice (or breathe slowly)
         env = (self._cur or {}).get("env") if speaking and self.cfg.get("pulse_with_voice") else None
         if env and dur:
@@ -1296,6 +1590,10 @@ class Widget:
             lvl = round((0.5 - 0.5 * math.cos(2 * math.pi * phase)) * (LEVELS - 1))
         else:
             lvl = -2 if not (self._cur or self._q) else LEVELS // 2
+        if mini:
+            dim = lvl == -2
+            mini.render(0 if dim else lvl / (LEVELS - 1), dim, len(self._calls))
+            return speaking
         if lvl != self._level:
             self._level = lvl
             dim = lvl == -2
@@ -1680,9 +1978,9 @@ class Widget:
                 x, y = p(PAD), y + ch + p(8)
             label = self._ellipsize(label, font, tw + 1)
             base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if is_fill else self.art.pill(
-                w, ch, outline=(255, 255, 255, 36))
+                w, ch, outline=(*INK, 36))
             hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if is_fill else self.art.pill(
-                w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
+                w, ch, fill=(*INK, 14), outline=(245, 158, 11, 120))
             tag = f"chip{n}"
             img = c.create_image(x, y, anchor="nw", image=base, tags=("pan", "ask", tag))
             txt = c.create_text(x + w / 2, y + ch / 2, text=label, font=font,
@@ -1778,7 +2076,7 @@ class Widget:
 
     def _entry_img(self, focus):
         return self.art.pill(self.Wp - 2 * self.p(PAD), self.p(42), fill=Art._rgba(CARD_HI),
-                             outline=(245, 158, 11, 150) if focus else (255, 255, 255, 30))
+                             outline=(245, 158, 11, 150) if focus else (*INK, 30))
 
     def _answer(self, item, text, answers=None):
         cid = self._call_id(item)
@@ -1890,8 +2188,8 @@ class Widget:
         if self._typed:
             self._typed_results()
         # settings changed from outside the player (the HTTP API or settings.json)
-        if self.cfg.get("text_size") != self._built_size:
-            self._built_size = self.cfg.get("text_size")
+        if self._look() != self._built_size:
+            self._built_size = self._look()
             self.root.after(10, self._rebuild)
             return
         if self.cfg.get("opacity") != getattr(self, "_built_alpha", None):
@@ -1928,6 +2226,8 @@ class Widget:
                 self._call_ix = new_ids.index(fresh[0])
                 if not self._visible and self.hidden_for_next is not None:
                     self.show()  # a decision is waiting: come back even if hidden until the next voiceover
+                if self._mini and self.cfg.get("auto_open_calls"):
+                    self.restore()
                 if self.mode == "cap" and self._visible and self.cfg.get("auto_open_calls"):
                     self._auto_open = fresh[0]
                     self._set_mode("panel")
@@ -1971,7 +2271,7 @@ class Widget:
             tw = self.F["mono_s"].measure(badge)
             bw, bh = tw + p(16), p(20)
             img = self.art.pill(bw, bh, grad=(EMBER, AMBER)) if filled else self.art.pill(
-                bw, bh, outline=(255, 255, 255, 40))
+                bw, bh, outline=(*INK, 40))
             self.c.itemconfigure(self.badge, image=img)
             self.c.coords(self.badge, right, p(CAP_H / 2))
             self.c.coords(self.badge_t, right - bw / 2, p(CAP_H / 2))
@@ -2064,12 +2364,12 @@ class Widget:
             name = f"{n} call{'s' if n > 1 else ''} waiting on you" if n else "All caught up"
             meta = (f"Last: {last[0].get('project')} · {when(last[0]['ts'])}" if last
                     else "Waiting for the next reply")
-        nmax = Wp - p(78) - p(140)
+        nmax = Wp - p(78) - p(171)  # five header buttons
         shown_name = self._ellipsize(name, self.F["title"], nmax)
         if self._text(self.pan_name, shown_name) or force:
             c.coords(self.pan_arrow, p(78) + self.F["title"].measure(shown_name) + p(6), p(31))
         if not toast:
-            self._text(self.pan_meta, self._ellipsize(meta, self.F["meta"], Wp - p(78) - p(138)))
+            self._text(self.pan_meta, self._ellipsize(meta, self.F["meta"], Wp - p(78) - p(169)))
             self._fill(self.pan_meta, MUTED)
         self._text(self.next_t, self._ellipsize(f"Next: {q[0].get('project')}" if q else "Nothing after this",
                                                 self.F["meta"], p(150)))
@@ -2221,7 +2521,7 @@ class Widget:
     def _set(self, key, value):
         """Change one setting and apply it right away."""
         self.cfg.update(**{key: value})
-        if key == "text_size":
+        if key in ("text_size", "player_width", "theme"):
             self.root.after(10, self._rebuild)
             return
         if key == "opacity" and self._visible:
@@ -2332,7 +2632,7 @@ class Widget:
             if hint:
                 c.create_text(x0, y + p(29), anchor="w", text=hint, font=self.F["meta"], fill=FAINT, tags=("set", tag))
             sw, sh = p(36), p(20)
-            img = self.art.pill(sw, sh, grad=(AMBER, COOLED)) if on else self.art.pill(sw, sh, outline=(255, 255, 255, 50))
+            img = self.art.pill(sw, sh, grad=(AMBER, COOLED)) if on else self.art.pill(sw, sh, outline=(*INK, 50))
             cy = y + p(11) if not hint else y + p(16)
             c.create_image(x1, cy, anchor="e", image=img, tags=("set", tag))
             kx = x1 - p(10) if on else x1 - sw + p(10)
@@ -2367,6 +2667,31 @@ class Widget:
                                                       c.itemconfigure(vt, text=RIM_NAMES.get(cfg.get(key), ""))))
             return y + dp + p(14)
 
+        def themes(y):
+            """Theme cards: a small swatch of each theme's card, text and light; the chosen one has a ring."""
+            cur = cfg.get("theme")
+            c.create_text(x0, y + p(8), anchor="w", text="Theme", font=self.F["label"], fill=BODY, tags=("set",))
+            vt = c.create_text(x1, y + p(8), anchor="e", text=THEME_NAMES.get(cur, ""), font=self.F["mono"],
+                               fill=EMBER, tags=("set",))
+            y += p(24)
+            gap = p(8)
+            n = len(THEMES)
+            tw = (x1 - x0 - gap * (n - 1)) / n
+            th = p(46)
+            for i, (name, t) in enumerate(THEMES.items()):
+                tx = x0 + i * (tw + gap)
+                tag = f"th_{name}"
+                img = self.art.theme_card(int(tw), th, t, name == cur)
+                c.create_image(tx, y, anchor="nw", image=img, tags=("set", tag))
+                c.create_text(tx + p(10), y + th - p(12), anchor="w", text=THEME_NAMES[name], font=self.F["mono_s"],
+                              fill=t["FG"], tags=("set", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e, v=name: self._set("theme", v))
+                c.tag_bind(tag, "<Enter>", lambda e, v=name: (c.configure(cursor="hand2"),
+                                                              c.itemconfigure(vt, text=THEME_NAMES[v])))
+                c.tag_bind(tag, "<Leave>", lambda e: (c.configure(cursor=""),
+                                                      c.itemconfigure(vt, text=THEME_NAMES.get(cfg.get("theme"), ""))))
+            return y + th + p(16)
+
         def choice(key, title, opts, hints, y):
             """A row of pills, one selected (a setting with a few named values)."""
             cur = cfg.get(key)
@@ -2378,9 +2703,9 @@ class Widget:
                 if x > x0 and x + w > x1:
                     x, y = x0, y + ch + p(8)
                 sel = v == cur
-                base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(255, 255, 255, 36))
+                base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(*INK, 36))
                 hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if sel else self.art.pill(
-                    w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
+                    w, ch, fill=(*INK, 14), outline=(245, 158, 11, 120))
                 tag = f"ch_{key}_{v}"
                 img = c.create_image(x, y, anchor="nw", image=base, tags=("set", tag))
                 c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=OBSIDIAN if sel else FG,
@@ -2398,8 +2723,10 @@ class Widget:
 
         # appearance
         y = eyebrow("APPEARANCE", y)
+        y = themes(y)
         y = slider("text_size", "Text size", [0.85, 1.0, 1.15, 1.3, 1.5],
                    [SIZE_NAMES[v] for v in (0.85, 1.0, 1.15, 1.3, 1.5)], y)
+        y = slider("player_width", "Player width", list(WIDTH_NAMES), list(WIDTH_NAMES.values()), y)
         y = slider("opacity", "Opacity", [0.7, 0.8, 0.9, 1.0], ["70%", "80%", "90%", "100%"], y)
         y = swatches("rim_color", "Pulse color", y)
         y = slider("glow_size", "Glow size", [0, 6, 12, 18, 24], ["Rim only", "Small", "Medium", "Large", "Largest"], y)
@@ -2417,9 +2744,9 @@ class Widget:
             if x > x0 and x + w > x1:
                 x, y = x0, y + ch + p(8)
             sel = v == cur_v
-            base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(255, 255, 255, 36))
+            base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(*INK, 36))
             hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if sel else self.art.pill(
-                w, ch, fill=(255, 255, 255, 14), outline=(245, 158, 11, 120))
+                w, ch, fill=(*INK, 14), outline=(245, 158, 11, 120))
             tag = f"vc_{v}"
             img = c.create_image(x, y, anchor="nw", image=base, tags=("set", tag))
             c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=OBSIDIAN if sel else FG,
@@ -2483,6 +2810,8 @@ class Widget:
             return f"{v:g}\u00d7"
         if key == "calls_hours":
             return "3d" if v == 72 else f"{v}h"
+        if key == "player_width":
+            return {0.85: "N", 1.0: "M", 1.2: "W", 1.4: "XW"}[v]
         return str(v)
 
     def _slide(self, key, x):
@@ -2522,9 +2851,9 @@ class Widget:
             self._toast("Playing a sample")
 
     def _restore_defaults(self):
-        size = self.cfg.get("text_size")
+        size = self._look()
         self.cfg.reset()
-        if self.cfg.get("text_size") != size:
+        if self._look() != size:
             self.root.after(10, self._rebuild)
             return
         try:

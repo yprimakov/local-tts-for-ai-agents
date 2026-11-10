@@ -72,6 +72,9 @@ SETTINGS_SCHEMA = {
     # rim pulse colour (MadeFire Promethean Amber first) and how far its glow reaches into the card (px)
     "rim_color": (["#F59E0B", "#EA580C", "#FBBF24", "#F43F5E", "#8B5CF6", "#3B82F6", "#14B8A6", "#E5E7EB"], "#F59E0B"),
     "glow_size": ([0, 6, 12, 18, 24], 12),
+    "player_width": ([0.85, 1.0, 1.2, 1.4], 1.0),  # of the base width, independent of the text size
+    "theme": (["ember", "graphite", "midnight", "daylight"], "ember"),
+    "minimized": (bool, False),  # the player is a small orb; kept across restarts
 }
 
 

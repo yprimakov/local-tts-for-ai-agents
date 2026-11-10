@@ -251,6 +251,27 @@ class SettingsTests(unittest.TestCase):
         again.reset()
         self.assertEqual(voiced.Settings(path).get("text_size"), 1.0)
 
+    def test_appearance_settings(self):
+        st = voiced.Settings(Path(tempfile.mkdtemp()) / "settings.json")
+        self.assertEqual((st.get("player_width"), st.get("theme"), st.get("minimized")), (1.0, "ember", False))
+        st.update(player_width=1.4, theme="daylight", minimized=True)
+        self.assertEqual((st.get("player_width"), st.get("theme"), st.get("minimized")), (1.4, "daylight", True))
+        st.update(player_width=3, theme="neon", minimized="yes")    # not allowed: ignored
+        self.assertEqual((st.get("player_width"), st.get("theme"), st.get("minimized")), (1.4, "daylight", True))
+
+    def test_themes_complete_and_readable(self):
+        import player
+        keys = set(player.THEMES["ember"])
+        def lum(h):
+            c = [int(h[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+            c = [x / 12.92 if x <= 0.03928 else ((x + 0.055) / 1.055) ** 2.4 for x in c]
+            return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
+        for name, t in player.THEMES.items():
+            self.assertEqual(set(t), keys, name)
+            a, b = sorted((lum(t["FAINT"]), lum(t["CARD"])))
+            self.assertGreaterEqual((b + 0.05) / (a + 0.05), 4.5, name)
+        self.assertEqual(sorted(player.THEMES), sorted(voiced.SETTINGS_SCHEMA["theme"][0]))
+
     def test_background_setting_speaks_headless(self):
         st = voiced.Settings()
         vq = voiced.VoiceQueue(voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl"), fake_synth, FakePlayer,

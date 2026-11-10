@@ -465,7 +465,16 @@ reply is speaking. Three sizes:
   Open session, Answer and Copy resume. Background runs are counted, not listed
 
 Click the project name to open the session it came from. Right-click for: hide for an hour, mute one noisy
-project for an hour, clear the queue, quit. Esc or X hides it until the next voiceover. Keys (after
+project for an hour, minimize to an orb, clear the queue, quit. Esc or X hides it until the next voiceover.
+
+**Minimize** (the dash button in the panel header, or right-click > "Minimize to an orb") shrinks the player
+to a 40 px ember orb where the player was. The orb pulses while a reply speaks and shows the number of calls
+waiting on you. Click it to restore it; drag it to move it. The minimized state survives a restart. A new call
+restores the player only when "Open the panel when a call arrives" is on.
+
+**Bring it back**: the Start menu shortcut **Ember Voice Player** (`show_player.pyw`, icon in
+`assets/ember-voice.ico`) restores a hidden or minimized player, or starts the daemon if it is down.
+Scripts can do the same with `POST /show`. Keys (after
 clicking the player): Space pause, Right skip, M mute, 1-9 pick an option.
 
 ### Settings
@@ -475,7 +484,9 @@ The gear button opens Settings. Changes apply at once and are saved to
 
 | Setting | Choices | Default |
 | --- | --- | --- |
+| Theme | Ember, Graphite (neutral greys), Midnight (deep navy, cool blue), Daylight (warm cream, dark text) | Ember |
 | Text size (scales the whole player) | S, M, L, XL, XXL | M |
+| Player width (independent of text size) | Narrow, Default, Wide, Wider (0.85x to 1.4x) | Default |
 | Opacity | 70, 80, 90, 100% | 100% |
 | Pulse color (rim and glow) | Promethean Amber (MadeFire orange), Cooled Ember, Ember Light, Rose, Violet, Blue, Teal, White | Promethean Amber |
 | Glow size (how far the glow reaches outside the rim) | Rim only, Small, Medium, Large, Largest | Medium |
