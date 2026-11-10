@@ -268,8 +268,13 @@ class SettingsTests(unittest.TestCase):
             return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
         for name, t in player.THEMES.items():
             self.assertEqual(set(t), keys, name)
-            a, b = sorted((lum(t["FAINT"]), lum(t["CARD"])))
-            self.assertGreaterEqual((b + 0.05) / (a + 0.05), 4.5, name)
+            def ratio(x, y):
+                a, b = sorted((lum(x), lum(y)))
+                return (b + 0.05) / (a + 0.05)
+            for fg, bg in (("FAINT", "CARD"), ("EMBER", "CARD")):
+                self.assertGreaterEqual(ratio(t[fg], t[bg]), 4.5, (name, fg))
+            for end in t["ACC"] + t["ACC_HI"]:              # text on the filled answer buttons
+                self.assertGreaterEqual(ratio(t["ACC_INK"], end), 4.5, (name, end))
         self.assertEqual(sorted(player.THEMES), sorted(voiced.SETTINGS_SCHEMA["theme"][0]))
 
     def test_background_setting_speaks_headless(self):

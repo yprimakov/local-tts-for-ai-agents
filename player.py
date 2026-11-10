@@ -35,6 +35,7 @@ AMBER, EMBER, BRONZE, COOLED = "#F59E0B", "#FBBF24", "#D97706", "#EA580C"
 OBSIDIAN = "#0b0b0d"
 INK = (255, 255, 255)                          # faint outlines and hover washes are this colour at low alpha
 GLOW_WARM, GLOW_COOL = (245, 158, 11), (20, 184, 166)  # the card's ambient light
+ACC, ACC_HI, ACC_INK, ACC_RGB = ("#F59E0B", "#EA580C"), ("#FBBF24", "#F59E0B"), "#0b0b0d", (245, 158, 11)  # filled buttons
 ORB_GLASS = (32, 27, 22)                       # the idle orb's dark glass
 
 # Themes set the card, text, hairline and ambient light. The pulse colour is its own setting.
@@ -42,16 +43,20 @@ ORB_GLASS = (32, 27, 22)                       # the idle orb's dark glass
 THEMES = {
     "ember": dict(CARD="#121214", CARD_HI="#1a1a1d", HOVER="#1d1d21", HAIR="#29292e", FG="#f7f7f7",
                   BODY="#e2e2e6", MUTED="#8e8f92", FAINT="#7c7d83", EMBER="#FBBF24", INK=(255, 255, 255),
-                  GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(32, 27, 22)),
+                  GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(32, 27, 22),
+                  ACC=("#F59E0B", "#EA580C"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#0b0b0d", ACC_RGB=(245, 158, 11)),
     "graphite": dict(CARD="#161616", CARD_HI="#1f1f1f", HOVER="#242424", HAIR="#2e2e2e", FG="#fafafa",
                      BODY="#e5e5e5", MUTED="#a3a3a3", FAINT="#8a8a8a", EMBER="#f5f5f5", INK=(255, 255, 255),
-                     GLOW_WARM=(255, 255, 255), GLOW_COOL=(160, 160, 160), ORB_GLASS=(30, 30, 30)),
+                     GLOW_WARM=(255, 255, 255), GLOW_COOL=(160, 160, 160), ORB_GLASS=(30, 30, 30),
+                     ACC=("#f5f5f5", "#cfcfcf"), ACC_HI=("#ffffff", "#e5e5e5"), ACC_INK="#111111", ACC_RGB=(229, 229, 229)),
     "midnight": dict(CARD="#0d1424", CARD_HI="#131c30", HOVER="#18223a", HAIR="#23304a", FG="#f1f5f9",
                      BODY="#dbe4f0", MUTED="#94a3b8", FAINT="#7d8aa0", EMBER="#93c5fd", INK=(255, 255, 255),
-                     GLOW_WARM=(59, 130, 246), GLOW_COOL=(14, 165, 233), ORB_GLASS=(17, 26, 46)),
+                     GLOW_WARM=(59, 130, 246), GLOW_COOL=(14, 165, 233), ORB_GLASS=(17, 26, 46),
+                     ACC=("#60a5fa", "#3b82f6"), ACC_HI=("#93c5fd", "#60a5fa"), ACC_INK="#0b1220", ACC_RGB=(96, 165, 250)),
     "daylight": dict(CARD="#f9f5ea", CARD_HI="#fffdf7", HOVER="#f1ebdc", HAIR="#e3dccb", FG="#1c1917",
                      BODY="#36302a", MUTED="#5c564f", FAINT="#6b645c", EMBER="#a1520a", INK=(60, 40, 10),
-                     GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(255, 250, 238)),
+                     GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(255, 250, 238),
+                     ACC=("#F59E0B", "#F97316"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#1c1917", ACC_RGB=(217, 119, 6)),
 }
 THEME_NAMES = {"ember": "Ember", "graphite": "Graphite", "midnight": "Midnight", "daylight": "Daylight"}
 
@@ -761,6 +766,7 @@ class Widget:
         self._tip_job = None
         self._visible = False
         self._badge_left = self.Wp
+        self._cap_hover = False
         self._cap_track_end = self.Wp
         self._bar_y = 0
         self.view = "now"           # now | settings (panel)
@@ -870,7 +876,31 @@ class Widget:
                 lo = mid
             else:
                 hi = mid - 1
-        return text[:lo].rstrip() + "…"
+        cut = text[:lo]
+        b = max(cut.rfind(ch) for ch in " -_/")       # end at a word boundary when one is near
+        if b >= lo * 0.4:
+            cut = cut[:b]
+        return cut.rstrip(" ·:,;-_/") + "…"
+
+    def _fit(self, opts, font, maxw: int) -> str:
+        """The first of several phrasings that fits, else the last one cut at a word."""
+        opts = opts if isinstance(opts, tuple) else (opts,)
+        for o in opts:
+            if font.measure(o) <= maxw:
+                return o
+        return self._ellipsize(opts[-1], font, maxw)
+
+    @staticmethod
+    def _calls_names(n: int):
+        s = "s" if n > 1 else ""
+        return (f"{n} call{s} waiting on you", f"{n} call{s} waiting", f"{n} call{s}")
+
+    @staticmethod
+    def _last_lines(last):
+        if not last:
+            return ("Waiting for the next reply", "Waiting")
+        proj, t = last[0].get("project"), when(last[0]["ts"])
+        return (f"Last: {proj} · {t}", f"{proj} · {t}", f"Last: {t}")
 
     def _anim(self, name, dur, fn, ease=ease_out, done=None):
         self._anims[name] = {"t0": time.perf_counter(), "dur": max(0.001, dur), "fn": fn, "ease": ease, "done": done}
@@ -905,6 +935,9 @@ class Widget:
         c.place(x=0, y=0)
         # a borderless window never takes the keyboard by itself: clicking it does, so Space, M, 1-9 and Esc work
         c.bind("<ButtonPress-1>", lambda e: self.root.focus_force(), add="+")
+        c.bind("<Enter>", lambda e: self._set_cap_hover(True), add="+")
+        c.bind("<Leave>", lambda e: self._set_cap_hover(False), add="+")
+        self._cap_hover = False
         Wp = self.Wp
 
         # card: fill, rim, ambient light, corners on top (disabled: clicks fall through)
@@ -936,13 +969,13 @@ class Widget:
         self.cap_line = c.create_text(p(66), p(41), anchor="w", text="", font=self.F["line"], fill=MUTED,
                                       tags=("cap", "drag"))
         self.cap_track = c.create_line(p(66), p(55), p(200), p(55), fill=HAIR, width=max(1, p(2)), tags=("cap",))
-        self.cap_fill = c.create_line(p(66), p(55), p(66), p(55), fill=AMBER, width=max(1, p(2)), tags=("cap",))
+        self.cap_fill = c.create_line(p(66), p(55), p(66), p(55), fill=ACC[0], width=max(1, p(2)), tags=("cap",))
         c.tag_bind("capname", "<Button-1>", lambda e: self._open(self._shown or self._call()))
         c.tag_bind("capname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.cap_name, EMBER)))
         c.tag_bind("capname", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.cap_name, FG)))
         self._tipify("capname", lambda: "Open this session")
         self.badge = c.create_image(0, p(32), anchor="e", tags=("cap", "badge"), state="hidden")
-        self.badge_t = c.create_text(0, p(32), text="", font=self.F["mono_s"], fill=OBSIDIAN,
+        self.badge_t = c.create_text(0, p(32), text="", font=self.F["mono_s"], fill=ACC_INK,
                                      tags=("cap", "badge"), state="hidden")
         c.tag_bind("badge", "<Button-1>", lambda e: self._set_mode("panel"))
         self._tipify("badge", lambda: "Open the panel")
@@ -961,7 +994,7 @@ class Widget:
         # ---- panel
         self.pan_name = c.create_text(p(78), p(31), anchor="w", text="", font=self.F["title"], fill=FG,
                                       tags=("pan", "panname"))
-        self.pan_arrow = c.create_text(0, p(31), anchor="w", text="↗", font=self.F["name"], fill=AMBER,
+        self.pan_arrow = c.create_text(0, p(31), anchor="w", text="↗", font=self.F["name"], fill=EMBER,
                                        tags=("pan", "panname"))
         self.pan_meta = c.create_text(p(78), p(53), anchor="w", text="", font=self.F["meta"], fill=MUTED,
                                       tags=("pan", "drag"))
@@ -976,7 +1009,7 @@ class Widget:
         c.tag_lower(self.bar_hit, self.glow_cap)
         self.bar_track = c.create_line(p(PAD), 0, Wp - p(PAD), 0, fill=HAIR, width=max(1, p(3)), capstyle="round",
                                        tags=("pan", "play", "bar"))
-        self.bar_fill = c.create_line(p(PAD), 0, p(PAD), 0, fill=AMBER, width=max(1, p(3)), capstyle="round",
+        self.bar_fill = c.create_line(p(PAD), 0, p(PAD), 0, fill=ACC[0], width=max(1, p(3)), capstyle="round",
                                       tags=("pan", "play", "bar"))
         self.bar_tip = c.create_line(p(PAD), 0, p(PAD), 0, fill=EMBER, width=max(1, p(3)), capstyle="round",
                                      tags=("pan", "play", "bar"))
@@ -1000,7 +1033,7 @@ class Widget:
         self.next_t = c.create_text(0, 0, anchor="e", text="", font=self.F["meta"], fill=MUTED, tags=("pan", "play"))
 
         # calls waiting on you
-        self.call_rule = c.create_line(0, 0, 0, 0, fill=AMBER, tags=("pan", "ask"))
+        self.call_rule = c.create_line(0, 0, 0, 0, fill=ACC[0], tags=("pan", "ask"))
         self.call_eyebrow = c.create_text(0, 0, anchor="w", text="YOUR CALL", font=self.F["mono"], fill=EMBER,
                                           tags=("pan", "ask"))
         self.call_from = c.create_text(0, 0, anchor="w", text="", font=self.F["mono"], fill=MUTED,
@@ -1042,14 +1075,14 @@ class Widget:
         self.entry.bind("<FocusOut>", self._entry_blur)
         self.entry.bind("<Return>", lambda e: self._send_typed())
         self.entry.bind("<Escape>", lambda e: (self.root.focus_set(), "break")[1])
-        self.send_bg = c.create_image(0, 0, image=self.art.circle(32, fill=Art._rgba(AMBER)), tags=("pan", "ask", "send"))
-        self.send_g = c.create_text(0, 0, text=self.glyph("send"), font=self.F["icon_s"], fill=OBSIDIAN,
+        self.send_bg = c.create_image(0, 0, image=self.art.circle(32, fill=Art._rgba(ACC[0])), tags=("pan", "ask", "send"))
+        self.send_g = c.create_text(0, 0, text=self.glyph("send"), font=self.F["icon_s"], fill=ACC_INK,
                                     tags=("pan", "ask", "send"))
         c.tag_bind("send", "<Button-1>", lambda e: self._send_typed())
         c.tag_bind("send", "<Enter>", lambda e: (c.itemconfigure(self.send_bg, image=self.art.circle(
-            32, fill=Art._rgba(EMBER))), c.configure(cursor="hand2")))
+            32, fill=Art._rgba(ACC_HI[0]))), c.configure(cursor="hand2")))
         c.tag_bind("send", "<Leave>", lambda e: (c.itemconfigure(self.send_bg, image=self.art.circle(
-            32, fill=Art._rgba(AMBER))), c.configure(cursor="")))
+            32, fill=Art._rgba(ACC[0]))), c.configure(cursor="")))
         self._tipify("send", lambda: "Send to the session (Enter)")
 
         # library toggle + list
@@ -1110,7 +1143,7 @@ class Widget:
 
     def _btn_color(self, name):
         if name == "mute" and self.vq.muted or name == "gear" and self.view == "settings":
-            return AMBER
+            return EMBER
         return MUTED
 
     def _set_glyph(self, name, glyph):
@@ -1521,10 +1554,22 @@ class Widget:
         else:
             self._reveal("pan")
 
+    def _set_cap_hover(self, on: bool):
+        """Hovering the capsule shows a minimize button in the badge's place."""
+        if on == self._cap_hover:
+            return
+        self._cap_hover = on
+        if self.mode == "cap":
+            self._place_buttons()
+            self._tick_once(force=True)
+
     def _place_buttons(self):
         p, Wp, c = self.p, self.Wp, self.c
         y = p(CAP_H / 2) if self.mode == "cap" else p(PAD + ORB / 2)
-        names = ("close", "size") if self.mode == "cap" else ("close", "size", "mini", "mute", "gear")
+        if self.mode == "cap":
+            names = ("close", "size", "mini") if self._cap_hover else ("close", "size")
+        else:
+            names = ("close", "size", "mini", "mute", "gear")
         for name in ("close", "size", "mini", "mute", "gear"):
             b = self.btn[name]
             if name in names:
@@ -1936,10 +1981,10 @@ class Widget:
             if lx > ix0 and lx + tw > ix1:
                 lx, y = ix0, y + p(22)
             tag = f"ctxlnk{n}"
-            t = c.create_text(lx, y, anchor="nw", text=text, font=self.F["link"], fill=AMBER, tags=("pan", "ask", tag))
+            t = c.create_text(lx, y, anchor="nw", text=text, font=self.F["link"], fill=EMBER, tags=("pan", "ask", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
             c.tag_bind(tag, "<Enter>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="hand2")))
-            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=AMBER), c.configure(cursor="")))
+            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="")))
             self.chips.append((t,))
             lx += tw + p(18)
         if actions:
@@ -1977,14 +2022,14 @@ class Widget:
             if x > p(PAD) and x + w > Wp - p(PAD):
                 x, y = p(PAD), y + ch + p(8)
             label = self._ellipsize(label, font, tw + 1)
-            base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if is_fill else self.art.pill(
+            base = self.art.pill(w, ch, grad=ACC) if is_fill else self.art.pill(
                 w, ch, outline=(*INK, 36))
-            hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if is_fill else self.art.pill(
-                w, ch, fill=(*INK, 14), outline=(245, 158, 11, 120))
+            hover = self.art.pill(w, ch, grad=ACC_HI) if is_fill else self.art.pill(
+                w, ch, fill=(*INK, 14), outline=(*ACC_RGB, 120))
             tag = f"chip{n}"
             img = c.create_image(x, y, anchor="nw", image=base, tags=("pan", "ask", tag))
             txt = c.create_text(x + w / 2, y + ch / 2, text=label, font=font,
-                                fill=OBSIDIAN if is_fill else FG, tags=("pan", "ask", tag))
+                                fill=ACC_INK if is_fill else FG, tags=("pan", "ask", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, o=opt, it=call: self._reply(it, o))
             c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h),
                                                                   c.configure(cursor="hand2")))
@@ -2011,7 +2056,7 @@ class Widget:
         for j, dec in enumerate(decs):
             tag = f"qrev{j}"
             top = y
-            num = c.create_text(p(PAD), y + p(1), anchor="nw", text=f"{j + 1}", font=self.F["mono"], fill=AMBER,
+            num = c.create_text(p(PAD), y + p(1), anchor="nw", text=f"{j + 1}", font=self.F["mono"], fill=EMBER,
                                 tags=("pan", "ask", tag))
             q = c.create_text(tx, y, anchor="nw", width=maxw - p(24) - p(18), text=dec["question"],
                               font=self.F["meta"], fill=MUTED, tags=("pan", "ask", tag))
@@ -2040,11 +2085,11 @@ class Widget:
                 self.chips.append((ln,))
         y += p(2)
         bh = p(42)
-        base = self.art.pill(maxw, bh, grad=(AMBER, COOLED))
-        hover = self.art.pill(maxw, bh, grad=(EMBER, AMBER))
+        base = self.art.pill(maxw, bh, grad=ACC)
+        hover = self.art.pill(maxw, bh, grad=ACC_HI)
         img = c.create_image(p(PAD), y, anchor="nw", image=base, tags=("pan", "ask", "sendall"))
         txt = c.create_text(Wp / 2, y + bh / 2, text=f"Send {len(decs)} answers to {call.get('project') or 'the session'}",
-                            font=self.F["chip"], fill=OBSIDIAN, tags=("pan", "ask", "sendall"))
+                            font=self.F["chip"], fill=ACC_INK, tags=("pan", "ask", "sendall"))
         c.tag_bind("sendall", "<Button-1>", lambda e: self._send_all(call))
         c.tag_bind("sendall", "<Enter>", lambda e: (c.itemconfigure(img, image=hover), c.configure(cursor="hand2")))
         c.tag_bind("sendall", "<Leave>", lambda e: (c.itemconfigure(img, image=base), c.configure(cursor="")))
@@ -2076,7 +2121,7 @@ class Widget:
 
     def _entry_img(self, focus):
         return self.art.pill(self.Wp - 2 * self.p(PAD), self.p(42), fill=Art._rgba(CARD_HI),
-                             outline=(245, 158, 11, 150) if focus else (*INK, 30))
+                             outline=(*ACC_RGB, 150) if focus else (*INK, 30))
 
     def _answer(self, item, text, answers=None):
         cid = self._call_id(item)
@@ -2270,18 +2315,20 @@ class Widget:
         if badge:
             tw = self.F["mono_s"].measure(badge)
             bw, bh = tw + p(16), p(20)
-            img = self.art.pill(bw, bh, grad=(EMBER, AMBER)) if filled else self.art.pill(
+            img = self.art.pill(bw, bh, grad=ACC_HI) if filled else self.art.pill(
                 bw, bh, outline=(*INK, 40))
             self.c.itemconfigure(self.badge, image=img)
             self.c.coords(self.badge, right, p(CAP_H / 2))
             self.c.coords(self.badge_t, right - bw / 2, p(CAP_H / 2))
             self._text(self.badge_t, badge)
-            self._fill(self.badge_t, OBSIDIAN if filled else MUTED)
+            self._fill(self.badge_t, ACC_INK if filled else MUTED)
             self._badge_left = right - bw
         else:
             self._badge_left = right + p(17)
+        if self._cap_hover:                              # the minimize button takes the badge's place
+            self._badge_left = min(self._badge_left, right - p(24))
         if self.mode == "cap":
-            self.c.itemconfigure("badge", state="normal" if badge else "hidden")
+            self.c.itemconfigure("badge", state="normal" if badge and not self._cap_hover else "hidden")
         self._cap_track_end = self._badge_left - p(10) if badge else right - p(4)
 
         # orb glyph
@@ -2298,19 +2345,18 @@ class Widget:
                 line = "Paused · " + line
         elif self._calls:
             n = len(self._calls)
-            name = f"{n} call{'s' if n > 1 else ''} waiting on you"
+            name = self._calls_names(n)
             decs = decisions_of(self._calls[0])
             many = f" · {len(decs)} questions" if len(decs) > 1 else ""
             line = f"{self._calls[0].get('project')}{many}: {decs[0]['question']}"
         else:
             last = self.vq.history.recent(1)
             name = "All caught up"
-            line = (f"Last: {last[0].get('project')} · {when(last[0]['ts'])}" if last
-                    else "Waiting for the next reply")
+            line = self._last_lines(last)
         nmax = self._badge_left - p(66) - p(10)
-        self._text(self.cap_name, self._ellipsize(name, self.F["name"], nmax))
+        self._text(self.cap_name, self._fit(name, self.F["name"], nmax))
         if not toast:
-            self._text(self.cap_line, self._ellipsize(line, self.F["line"], self._cap_line_w()))
+            self._text(self.cap_line, self._fit(line, self.F["line"], self._cap_line_w()))
             self._fill(self.cap_line, MUTED)
         if self.mode == "cap":
             st_play = "normal" if cur else "hidden"
@@ -2361,15 +2407,14 @@ class Widget:
         else:
             last = self.vq.history.recent(1)
             n = len(self._calls)
-            name = f"{n} call{'s' if n > 1 else ''} waiting on you" if n else "All caught up"
-            meta = (f"Last: {last[0].get('project')} · {when(last[0]['ts'])}" if last
-                    else "Waiting for the next reply")
+            name = self._calls_names(n) if n else "All caught up"
+            meta = self._last_lines(last)
         nmax = Wp - p(78) - p(171)  # five header buttons
-        shown_name = self._ellipsize(name, self.F["title"], nmax)
+        shown_name = self._fit(name, self.F["title"], nmax)
         if self._text(self.pan_name, shown_name) or force:
             c.coords(self.pan_arrow, p(78) + self.F["title"].measure(shown_name) + p(6), p(31))
         if not toast:
-            self._text(self.pan_meta, self._ellipsize(meta, self.F["meta"], Wp - p(78) - p(169)))
+            self._text(self.pan_meta, self._fit(meta, self.F["meta"], Wp - p(78) - p(169)))
             self._fill(self.pan_meta, MUTED)
         self._text(self.next_t, self._ellipsize(f"Next: {q[0].get('project')}" if q else "Nothing after this",
                                                 self.F["meta"], p(150)))
@@ -2579,7 +2624,7 @@ class Widget:
         y = p(PAD + ORB + 18)
 
         def eyebrow(text, y, link=None):
-            c.create_line(x0, y, x0 + p(20), y, fill=AMBER, tags=("set",))
+            c.create_line(x0, y, x0 + p(20), y, fill=ACC[0], tags=("set",))
             c.create_text(x0 + p(28), y, anchor="w", text=text, font=self.F["mono"], fill=EMBER, tags=("set",))
             if link:
                 label, fn = link
@@ -2603,7 +2648,7 @@ class Widget:
             c.tag_lower(c.create_rectangle(x0, ty - p(14), x1, ty + p(14), fill=CARD, width=0, tags=("set", "sethit", tag)),
                         self.glow_cap)  # hit area under the (mouse-transparent) ambient light
             c.create_line(a, ty, b, ty, fill=HAIR, width=max(1, p(3)), capstyle="round", tags=("set", tag))
-            fill = c.create_line(a, ty, xs[ix], ty, fill=AMBER, width=max(1, p(3)), capstyle="round",
+            fill = c.create_line(a, ty, xs[ix], ty, fill=ACC[0], width=max(1, p(3)), capstyle="round",
                                  tags=("set", tag))
             dots = []
             for i, x in enumerate(xs):
@@ -2632,7 +2677,7 @@ class Widget:
             if hint:
                 c.create_text(x0, y + p(29), anchor="w", text=hint, font=self.F["meta"], fill=FAINT, tags=("set", tag))
             sw, sh = p(36), p(20)
-            img = self.art.pill(sw, sh, grad=(AMBER, COOLED)) if on else self.art.pill(sw, sh, outline=(*INK, 50))
+            img = self.art.pill(sw, sh, grad=ACC) if on else self.art.pill(sw, sh, outline=(*INK, 50))
             cy = y + p(11) if not hint else y + p(16)
             c.create_image(x1, cy, anchor="e", image=img, tags=("set", tag))
             kx = x1 - p(10) if on else x1 - sw + p(10)
@@ -2703,12 +2748,12 @@ class Widget:
                 if x > x0 and x + w > x1:
                     x, y = x0, y + ch + p(8)
                 sel = v == cur
-                base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(*INK, 36))
-                hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if sel else self.art.pill(
-                    w, ch, fill=(*INK, 14), outline=(245, 158, 11, 120))
+                base = self.art.pill(w, ch, grad=ACC) if sel else self.art.pill(w, ch, outline=(*INK, 36))
+                hover = self.art.pill(w, ch, grad=ACC_HI) if sel else self.art.pill(
+                    w, ch, fill=(*INK, 14), outline=(*ACC_RGB, 120))
                 tag = f"ch_{key}_{v}"
                 img = c.create_image(x, y, anchor="nw", image=base, tags=("set", tag))
-                c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=OBSIDIAN if sel else FG,
+                c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=ACC_INK if sel else FG,
                               tags=("set", tag))
                 c.tag_bind(tag, "<Button-1>", lambda e, v=v: self._set(key, v))
                 c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h), c.configure(cursor="hand2")))
@@ -2744,12 +2789,12 @@ class Widget:
             if x > x0 and x + w > x1:
                 x, y = x0, y + ch + p(8)
             sel = v == cur_v
-            base = self.art.pill(w, ch, grad=(AMBER, COOLED)) if sel else self.art.pill(w, ch, outline=(*INK, 36))
-            hover = self.art.pill(w, ch, grad=(EMBER, AMBER)) if sel else self.art.pill(
-                w, ch, fill=(*INK, 14), outline=(245, 158, 11, 120))
+            base = self.art.pill(w, ch, grad=ACC) if sel else self.art.pill(w, ch, outline=(*INK, 36))
+            hover = self.art.pill(w, ch, grad=ACC_HI) if sel else self.art.pill(
+                w, ch, fill=(*INK, 14), outline=(*ACC_RGB, 120))
             tag = f"vc_{v}"
             img = c.create_image(x, y, anchor="nw", image=base, tags=("set", tag))
-            c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=OBSIDIAN if sel else FG,
+            c.create_text(x + w / 2, y + ch / 2, text=label, font=self.F["chip"], fill=ACC_INK if sel else FG,
                           tags=("set", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, v=v: (self._set("voice", v), self._preview()))
             c.tag_bind(tag, "<Enter>", lambda e, i=img, h=hover: (c.itemconfigure(i, image=h), c.configure(cursor="hand2")))
@@ -2781,10 +2826,10 @@ class Widget:
         for label, fn, anchor, x in (("Restore defaults", self._restore_defaults, "w", x0),
                                      ("Reset position", self._reset_position, "e", x1)):
             tag = f"ft{label}"
-            t = c.create_text(x, fy, anchor=anchor, text=label, font=self.F["link"], fill=AMBER, tags=("set", tag))
+            t = c.create_text(x, fy, anchor=anchor, text=label, font=self.F["link"], fill=EMBER, tags=("set", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
             c.tag_bind(tag, "<Enter>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="hand2")))
-            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=AMBER), c.configure(cursor="")))
+            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="")))
         y = fy + p(16) + p(R_PANEL)
         c.tag_raise("set")
         c.tag_lower("sethit", self.glow_cap)  # hit areas stay under the ambient light
@@ -3002,10 +3047,10 @@ class Widget:
             y = (bb[3] if bb else y + p(14)) + p(8)
         for i, (text, fn) in enumerate(links):
             tag = f"lnk{it['id']}{i}"
-            item = l.create_text(x, y, anchor="nw", text=text, font=self.F["link"], fill=AMBER, tags=(tag,))
+            item = l.create_text(x, y, anchor="nw", text=text, font=self.F["link"], fill=EMBER, tags=(tag,))
             l.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
             l.tag_bind(tag, "<Enter>", lambda e, i=item: (l.itemconfigure(i, fill=EMBER), l.configure(cursor="hand2")))
-            l.tag_bind(tag, "<Leave>", lambda e, i=item: (l.itemconfigure(i, fill=AMBER), l.configure(cursor="")))
+            l.tag_bind(tag, "<Leave>", lambda e, i=item: (l.itemconfigure(i, fill=EMBER), l.configure(cursor="")))
             x += self.F["link"].measure(text) + p(16)
         y += p(28)
         l.coords(bg, 0, top, w, y)
