@@ -64,7 +64,7 @@ SETTINGS_SCHEMA = {
     "speak_background": (bool, False),
     "auto_open_calls": (bool, True),
     "hide_when_idle": (bool, False),
-    "calls_hours": ([6, 12, 24, 72], 72),
+    "calls_hours": ([6, 12, 24, 72, 168], 72),
     # answers to a session open in the Claude app: type them into its thread and send, paste only, or the old
     # background `claude --resume -p` (invisible in the app's thread, which then goes out of date)
     "desktop_answers": (["send", "paste", "background"], "send"),
@@ -496,6 +496,11 @@ class History:
                 self.items = keep
                 self._rewrite()
 
+    def since(self, cutoff: float) -> list[dict]:
+        """Rows newer than `cutoff`, newest first (calls are picked by age, not by a row count)."""
+        with self._lock:
+            return [dict(r) for r in reversed(self.items) if r.get("ts", 0) >= cutoff]
+
     def recent(self, limit: int = 200) -> list[dict]:
         with self._lock:
             return [dict(r) for r in reversed(self.items[-limit:])]
@@ -605,7 +610,7 @@ class VoiceQueue:
         seen: dict[str, float] = {}  # row id -> transcript mtime already checked
         while not self._stop:
             try:
-                for r in self.history.recent(200):
+                for r in self.history.recent(3000):
                     if (not decisions_of(r) or r.get("answer") or r.get("dismissed") or r.get("headless")
                             or time.time() - r.get("ts", 0) > hours * 3600):
                         continue
@@ -670,7 +675,7 @@ class VoiceQueue:
         while not self._stop:
             try:
                 hours = float(self.settings.get("calls_hours") or 72)
-                rows = self.history.recent(400)
+                rows = self.history.recent(3000)
                 keys = {r.get("scan_key") for r in rows if r.get("scan_key")}
                 last: dict[str, dict] = {}
                 for r in rows:
@@ -1195,7 +1200,10 @@ def waiting_sessions(root: Path | None = None, hours: float = 72, quiet_for: flo
         else:
             pts = d.get("postTurnSummary") or {}
             need = str(pts.get("needs_action") or "").strip()
-            if not (need and pts.get("status_category") == "blocked" and now - at > quiet_for
+            cat = pts.get("status_category")
+            if cat == "review_ready" and not need:  # finished, waiting for his review
+                need = "Ready for your review: " + str(pts.get("status_detail") or "the session's result").strip()
+            if not (need and cat in ("blocked", "review_ready") and now - at > quiet_for
                     and pts.get("summarizes_uuid") == d.get("lastAssistantUuid")):
                 continue  # still working, or the summary is about an older turn
             key = str(pts.get("summarizes_uuid") or "")

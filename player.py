@@ -2001,7 +2001,8 @@ class Widget:
     def _collect_calls_raw(self, cur) -> list[dict]:
         now = time.time()
         calls, seen = [], set()
-        rows = self.vq.history.recent(150)
+        # by age, not count: a busy day writes 60+ rows, so the last 150 rows covered under 3 days
+        rows = self.vq.history.since(now - 3600 * float(self.cfg.get("calls_hours")) - 86400)
         newest: dict[str, float] = {}  # a later reply from the same session means it was answered there
         for r in rows:
             sid = r.get("session_id")
@@ -3144,7 +3145,7 @@ class Widget:
         y = eyebrow("BEHAVIOR", y)
         y = toggle("auto_open_calls", "Open the panel when a call arrives", None, y)
         y = toggle("hide_when_idle", "Hide when nothing is playing", "Comes back with the next reply or call", y)
-        y = slider("calls_hours", "Keep calls waiting for", [6, 12, 24, 72], ["6 hours", "12 hours", "1 day", "3 days"], y)
+        y = slider("calls_hours", "Keep calls waiting for", [6, 12, 24, 72, 168], ["6 hours", "12 hours", "1 day", "3 days", "1 week"], y)
         y = choice("desktop_answers", "Answers to Claude app threads",
                    [("send", "Type and send"), ("paste", "Paste only"), ("background", "Background")],
                    {"send": "Typed into the thread and sent, so it shows there",

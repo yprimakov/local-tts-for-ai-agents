@@ -343,6 +343,19 @@ class WaitingScanTests(unittest.TestCase):
         self.assertEqual(by["s2"]["decision"]["question"], "Refund the test charge")
         self.assertEqual(len(self.scan()), 2)  # the same turn never makes a second call
 
+    def test_review_ready_becomes_a_call(self):
+        self.session("rv", summary={"status_category": "review_ready", "status_detail": "PR 12 is open",
+                                    "summarizes_uuid": "u1"})
+        rows = self.scan()
+        self.assertEqual(rows[0]["decision"]["question"], "Ready for your review: PR 12 is open")
+
+    def test_history_since_is_by_age(self):
+        for i in range(300):
+            self.h.add({"id": f"n{i}", "ts": time.time() - i, "text": "x"})
+        self.h.add({"id": "old", "ts": time.time() - 5 * 86400, "text": "x"})
+        self.assertIn("old", [r["id"] for r in self.h.since(time.time() - 6 * 86400)])
+        self.assertNotIn("old", [r["id"] for r in self.h.since(time.time() - 4 * 86400)])
+
     def test_skips_answered_running_archived_and_own_runs(self):
         self.ask("a1", answered=True)
         self.session("a1")

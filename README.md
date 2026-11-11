@@ -435,7 +435,7 @@ The Stop hook no longer plays audio itself. It posts each reply to one local dae
 - keeps history as text in `%LOCALAPPDATA%\local-tts\history.jsonl` (7 days; replays are synthesized again)
 - finds sessions that wait on you even when no Stop hook made a call: every minute it reads the Claude app's
   Code sessions and makes a quiet call (history only, not spoken) for an open AskUserQuestion, with its options,
-  or for a turn the app marks as needing you. One call per session, its newest question, never twice for the same
+  or for a turn the app marks as needing you or ready for review. One call per session, its newest question, never twice for the same
   turn, and none when the hook's call is already open. Archived, pytest and temp sessions are skipped. The
   summarizer's own runs keep no transcripts (`--no-session-persistence`)
 - also finds plain terminal sessions (`~/.claude/projects` transcripts, interactive `claude` only): an open
@@ -515,7 +515,7 @@ The gear button opens Settings. Changes apply at once and are saved to
 | Speak background runs | on/off | off |
 | Open the panel when a call arrives | on/off | on |
 | Hide when nothing is playing | on/off | off |
-| Keep calls waiting for | 6h, 12h, 1 day, 3 days | 3 days |
+| Keep calls waiting for | 6h, 12h, 1 day, 3 days, 1 week | 3 days |
 | Answers to Claude app threads | Type and send, Paste only, Background | Type and send |
 
 "Restore defaults" and "Reset position" are at the bottom. Scripts can read and change the same values:
