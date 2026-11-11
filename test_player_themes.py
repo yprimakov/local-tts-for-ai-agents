@@ -106,6 +106,28 @@ class ThemeTests(unittest.TestCase):
                 self.assertIsNone(w._mini)
                 self.assertEqual(w._xy, xy)                       # back exactly where it was
 
+    def test_hover_tint_eases_and_press_dips(self):
+        w = self.w
+        w._set_mode("panel")
+        w._tick_once(force=True)
+        self.pump()
+        item = w.call_dismiss
+        w.c.itemconfigure(item, fill=player.FAINT)
+        w._tint(item, player.FG)
+        self.assertNotEqual(w.c.itemcget(item, "fill"), player.FG)   # not a jump
+        self.pump(0.3)
+        self.assertEqual(w.c.itemcget(item, "fill").lower(), player.FG.lower())
+        x, y = w.c.coords(item)
+        w.c.configure(cursor="hand2")
+        w.c.addtag_withtag("current", item)
+        w._press_fx(None)
+        self.assertEqual(w.c.coords(item)[1], y + 1)
+        w._release_fx(None)
+        self.pump(0.3)
+        self.assertAlmostEqual(w.c.coords(item)[1], y, places=1)
+        w.c.dtag(item, "current")
+        w.c.configure(cursor="")
+
     def test_theme_colours_are_readable(self):
         for name, t in player.THEMES.items():
             with self.subTest(theme=name):

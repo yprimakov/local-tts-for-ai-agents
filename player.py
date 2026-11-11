@@ -989,6 +989,63 @@ class Widget:
             return True
         return False
 
+    def _tint(self, item, color: str) -> None:
+        """Ease a hover colour change (120 ms, ease-out). A new target starts from wherever the colour is now."""
+        self._fills[item] = color
+        try:
+            start = self.c.itemcget(item, "fill")
+        except self.tk.TclError:
+            return
+        if start == color or not (start.startswith("#") and len(start) == 7 and color.startswith("#")):
+            self.c.itemconfigure(item, fill=color)
+            return
+
+        def step(t):
+            try:
+                self.c.itemconfigure(item, fill=mix(start, color, t))
+            except self.tk.TclError:
+                pass
+        self._anim(f"tint:{item}", 0.12, step)
+
+    _GENERIC_TAGS = {"pan", "ask", "set", "play", "cap", "current", "bg", "sethit", "askhit", "drag", "lib"}
+
+    def _press_fx(self, e):
+        """Press feedback without scaling: the pressed control dips 1 px and its text dims a step."""
+        c = self.c
+        if c.cget("cursor") != "hand2":
+            return
+        cur = c.find_withtag("current")
+        if not cur:
+            return
+        own = [t for t in c.gettags(cur[0]) if t not in self._GENERIC_TAGS]
+        items = c.find_withtag(own[-1]) if own else cur
+        self._pressed = {}
+        for i in items:
+            if c.itemcget(i, "state") == "hidden" or c.type(i) not in ("text", "image"):
+                continue
+            xy = c.coords(i)
+            if len(xy) != 2:
+                continue
+            fill = c.itemcget(i, "fill") if c.type(i) == "text" else ""
+            dim = mix(fill, CARD, 0.22) if fill.startswith("#") and len(fill) == 7 else ""
+            self._pressed[i] = (xy[0], xy[1], fill, dim)
+            c.coords(i, xy[0], xy[1] + 1)
+            if dim:
+                c.itemconfigure(i, fill=dim)
+
+    def _release_fx(self, e):
+        c, pressed = self.c, getattr(self, "_pressed", None) or {}
+        self._pressed = {}
+        for i, (x, y, fill, dim) in pressed.items():
+            try:
+                xy = c.coords(i)
+            except self.tk.TclError:
+                continue
+            if len(xy) == 2 and abs(xy[1] - (y + 1)) < 0.01:   # not moved by a new layout meanwhile
+                self._anim(f"press:{i}", 0.1, lambda t, i=i, x=x, y=y: c.coords(i, x, y + 1 - t))
+            if dim and c.itemcget(i, "fill") == dim:
+                self._tint(i, self._fills.get(i) or fill)
+
     def _fill(self, item, color: str) -> None:
         if self._fills.get(item) != color:
             self._fills[item] = color
@@ -1128,6 +1185,8 @@ class Widget:
         self._cap_hover = False
         self._set_off, self._set_max, self._set_bar_on, self._bar_job = 0, 0, False, None
         c.bind("<MouseWheel>", self._on_wheel, add="+")
+        c.bind("<ButtonPress-1>", self._press_fx, add="+")
+        c.bind("<ButtonRelease-1>", self._release_fx, add="+")
         Wp = self.Wp
 
         # card: fill, rim, ambient light, corners on top (disabled: clicks fall through)
@@ -1161,8 +1220,8 @@ class Widget:
         self.cap_track = c.create_line(p(66), p(55), p(200), p(55), fill=HAIR, width=max(1, p(2)), tags=("cap",))
         self.cap_fill = c.create_line(p(66), p(55), p(66), p(55), fill=ACC[0], width=max(1, p(2)), tags=("cap",))
         c.tag_bind("capname", "<Button-1>", lambda e: self._open(self._shown or self._call()))
-        c.tag_bind("capname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.cap_name, EMBER)))
-        c.tag_bind("capname", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.cap_name, FG)))
+        c.tag_bind("capname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.cap_name, EMBER)))
+        c.tag_bind("capname", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.cap_name, FG)))
         self._tipify("capname", lambda: "Open this session")
         self.badge = c.create_image(0, p(32), anchor="e", tags=("cap", "badge"), state="hidden")
         self.badge_t = c.create_text(0, p(32), text="", font=self.F["mono_s"], fill=ACC_INK,
@@ -1189,8 +1248,8 @@ class Widget:
         self.pan_meta = c.create_text(p(78), p(53), anchor="w", text="", font=self.F["meta"], fill=MUTED,
                                       tags=("pan", "drag"))
         c.tag_bind("panname", "<Button-1>", lambda e: self._open(self._shown or self._call()))
-        c.tag_bind("panname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.pan_name, EMBER)))
-        c.tag_bind("panname", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.pan_name, FG)))
+        c.tag_bind("panname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.pan_name, EMBER)))
+        c.tag_bind("panname", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.pan_name, FG)))
         self._tipify("panname", lambda: "Open this session")
         self.body = c.create_text(p(PAD), 0, anchor="nw", text="", font=self.F["body"], fill=BODY,
                                   width=self.Wp - 2 * p(PAD), tags=("pan", "play", "drag"))
@@ -1229,8 +1288,8 @@ class Widget:
         self.call_from = c.create_text(0, 0, anchor="w", text="", font=self.F["mono"], fill=MUTED,
                                        tags=("pan", "ask", "callfrom"))
         c.tag_bind("callfrom", "<Button-1>", lambda e: self._open(self._call()))
-        c.tag_bind("callfrom", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.call_from, FG)))
-        c.tag_bind("callfrom", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.call_from, MUTED)))
+        c.tag_bind("callfrom", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.call_from, FG)))
+        c.tag_bind("callfrom", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.call_from, MUTED)))
         self._tipify("callfrom", lambda: "Open this session")
         self.call_nav = c.create_text(0, 0, anchor="e", text="", font=self.F["mono"], fill=FAINT, tags=("pan", "ask"))
         self.call_prev = c.create_text(0, 0, anchor="e", text=self.glyph("left"), font=self.F["icon_s"], fill=MUTED,
@@ -1244,8 +1303,8 @@ class Widget:
         self.call_dismiss = c.create_text(0, 0, anchor="e", text="Dismiss", font=self.F["mono"], fill=FAINT,
                                           tags=("pan", "ask", "dismiss"))
         c.tag_bind("dismiss", "<Button-1>", lambda e: self._dismiss())
-        c.tag_bind("dismiss", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.call_dismiss, FG)))
-        c.tag_bind("dismiss", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.call_dismiss, FAINT)))
+        c.tag_bind("dismiss", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.call_dismiss, FG)))
+        c.tag_bind("dismiss", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.call_dismiss, FAINT)))
         self.question = c.create_text(p(PAD), 0, anchor="nw", text="", font=self.F["q"], fill=FG,
                                       width=self.Wp - 2 * p(PAD), tags=("pan", "ask", "drag"))
         self.chips: list[tuple] = []
@@ -1283,10 +1342,10 @@ class Widget:
         self.lib_count = c.create_text(self.Wp - p(PAD), 0, anchor="e", text="", font=self.F["mono"], fill=FAINT,
                                        tags=("pan", "libtoggle"))
         c.tag_bind("libtoggle", "<Button-1>", lambda e: self._toggle_lib())
-        c.tag_bind("libtoggle", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._fill(self.lib_t, FG),
-                                                      self._fill(self.lib_g, FG)))
-        c.tag_bind("libtoggle", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(self.lib_t, MUTED),
-                                                      self._fill(self.lib_g, MUTED)))
+        c.tag_bind("libtoggle", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.lib_t, FG),
+                                                      self._tint(self.lib_g, FG)))
+        c.tag_bind("libtoggle", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.lib_t, MUTED),
+                                                      self._tint(self.lib_g, MUTED)))
         self.lst = tk.Canvas(c, bg=CARD, highlightthickness=0, bd=0, width=self.Wp - 2 * p(PAD), height=p(10))
         self.lst_win = c.create_window(p(PAD), 0, anchor="nw", window=self.lst, width=self.Wp - 2 * p(PAD),
                                        height=p(10), tags=("lib",), state="hidden")
@@ -2058,7 +2117,7 @@ class Widget:
         color = color or FAINT
         t = c.create_text(x, y, anchor=anchor, text=text, font=self.F["mono"], fill=color, tags=("pan", "ask", tag))
         c.tag_bind(tag, "<Button-1>", lambda e: fn())
-        c.tag_bind(tag, "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure(t, fill=FG)))
+        c.tag_bind(tag, "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(t, FG)))
         c.tag_bind(tag, "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure(t, fill=color)))
         if tip:
             self._tipify(tag, lambda: tip)
@@ -2169,8 +2228,8 @@ class Widget:
                                  tags=("pan", "ask", "askhit", "ctxtog"))
         items.append(hit)
         c.tag_bind("ctxtog", "<Button-1>", lambda e: self._ctx_toggle(call, "ctx"))
-        c.tag_bind("ctxtog", "<Enter>", lambda e: (c.configure(cursor="hand2"), c.itemconfigure(g, fill=FG)))
-        c.tag_bind("ctxtog", "<Leave>", lambda e: (c.configure(cursor=""), c.itemconfigure(g, fill=MUTED)))
+        c.tag_bind("ctxtog", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(g, FG)))
+        c.tag_bind("ctxtog", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(g, MUTED)))
         self.chips.append(tuple(items))
         y += p(26)
         if not opened:
@@ -2219,8 +2278,8 @@ class Widget:
             tag = f"ctxlnk{n}"
             t = c.create_text(lx, y, anchor="nw", text=text, font=self.F["link"], fill=EMBER, tags=("pan", "ask", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
-            c.tag_bind(tag, "<Enter>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="hand2")))
-            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="")))
+            c.tag_bind(tag, "<Enter>", lambda e, t=t: (self._tint(t, FG), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, t=t: (self._tint(t, EMBER), c.configure(cursor="")))
             self.chips.append((t,))
             lx += tw + p(18)
         if actions:
@@ -2309,10 +2368,10 @@ class Widget:
             hit = c.create_rectangle(p(PAD) - p(8), top - p(7), Wp - p(PAD) + p(8), y + p(7), fill=CARD, width=0,
                                      tags=("pan", "ask", "askhit", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, j=j: self._goto_question(call, j))
-            c.tag_bind(tag, "<Enter>", lambda e, h=hit, g=g: (c.itemconfigure(h, fill=CARD_HI),
-                                                              c.itemconfigure(g, fill=FG), c.configure(cursor="hand2")))
-            c.tag_bind(tag, "<Leave>", lambda e, h=hit, g=g: (c.itemconfigure(h, fill=CARD),
-                                                              c.itemconfigure(g, fill=MUTED), c.configure(cursor="")))
+            c.tag_bind(tag, "<Enter>", lambda e, h=hit, g=g: (self._tint(h, CARD_HI),
+                                                              self._tint(g, FG), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, h=hit, g=g: (self._tint(h, CARD),
+                                                              self._tint(g, MUTED), c.configure(cursor="")))
             self._tipify(tag, lambda: "Change this answer")
             self.chips.append((num, q, a, g, hit))
             y += p(16)
@@ -2878,8 +2937,8 @@ class Widget:
                 tag = f"setlink{text}"
                 t = c.create_text(x1, y, anchor="e", text=label, font=self.F["mono"], fill=MUTED, tags=("set", tag))
                 c.tag_bind(tag, "<Button-1>", lambda e: fn())
-                c.tag_bind(tag, "<Enter>", lambda e: (c.itemconfigure(t, fill=FG), c.configure(cursor="hand2")))
-                c.tag_bind(tag, "<Leave>", lambda e: (c.itemconfigure(t, fill=MUTED), c.configure(cursor="")))
+                c.tag_bind(tag, "<Enter>", lambda e: (self._tint(t, FG), c.configure(cursor="hand2")))
+                c.tag_bind(tag, "<Leave>", lambda e: (self._tint(t, MUTED), c.configure(cursor="")))
             return y + p(22)
 
         def slider(key, title, stops, names, y):
@@ -3076,8 +3135,8 @@ class Widget:
             tag = f"ft{label}"
             t = c.create_text(x, fy, anchor=anchor, text=label, font=self.F["link"], fill=EMBER, tags=("set", tag))
             c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
-            c.tag_bind(tag, "<Enter>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="hand2")))
-            c.tag_bind(tag, "<Leave>", lambda e, t=t: (c.itemconfigure(t, fill=EMBER), c.configure(cursor="")))
+            c.tag_bind(tag, "<Enter>", lambda e, t=t: (self._tint(t, FG), c.configure(cursor="hand2")))
+            c.tag_bind(tag, "<Leave>", lambda e, t=t: (self._tint(t, EMBER), c.configure(cursor="")))
         y = fy + p(16) + p(R_PANEL)
         c.tag_raise("set")
         c.tag_lower("sethit", self.glow_cap)  # hit areas stay under the ambient light
@@ -3378,7 +3437,7 @@ class Widget:
             tag = f"lnk{it['id']}{i}"
             item = l.create_text(x, y, anchor="nw", text=text, font=self.F["link"], fill=EMBER, tags=(tag,))
             l.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
-            l.tag_bind(tag, "<Enter>", lambda e, i=item: (l.itemconfigure(i, fill=EMBER), l.configure(cursor="hand2")))
+            l.tag_bind(tag, "<Enter>", lambda e, i=item: (l.itemconfigure(i, fill=FG), l.configure(cursor="hand2")))
             l.tag_bind(tag, "<Leave>", lambda e, i=item: (l.itemconfigure(i, fill=EMBER), l.configure(cursor="")))
             x += self.F["link"].measure(text) + p(16)
         y += p(28)
