@@ -460,7 +460,11 @@ reply is speaking. Three sizes:
   or opened it in the Claude app, within Settings > "Put threads you worked in first", default 2 hours;
   a dot marks them), then the rest; newest first in each group. The star next to the project pins it
   (Shift+click pins only that thread); history rows and the right-click menu have the same toggle, and
-  Settings > Behavior lists the pins with Remove. Pinned replies also jump ahead in the voice queue,
+  Settings > Behavior lists the pins with Remove.
+  **Calls from Claude app Projects** (cloud threads) are pushed in, not polled: a session on this PC posts
+  `POST /calls/push` with `{id, project, thread, question, options, url}` the moment a thread needs you
+  (upserted by id, spoken, shown as "APP CALL"), and `POST /calls/push/<id>/done` closes it. A cloud thread
+  can't be answered from here, so each option opens its `url` (claude.ai links only) or the Claude app. Pinned replies also jump ahead in the voice queue,
   without cutting off the one playing. Pick an
   option (or press 1-9), or type another option or a follow-up and press Enter: it is sent to that session
   with `claude --resume <id> -p` in the background, and the session's reply plays here. A call disappears

@@ -692,6 +692,52 @@ class VoiceQueue:
         log(f"call {item['id']} ({src['project']}) waits for a permission")
         return item
 
+    def push_call(self, cid: str, project: str, thread: str, question: str, options=None, url: str = "") -> dict | None:
+        """A call pushed from outside (a cloud Claude app Project thread, through a session on this PC).
+        Upserted by id: a newer push for the same id replaces the open one. It is spoken like a reply (mute,
+        project mute and pins apply), and answered where the thread runs: every option opens its url."""
+        cid = " ".join(str(cid or "").split())[:120]
+        question = " ".join(str(question or "").split())[:240]
+        if not cid or not question:
+            return None
+        sid = f"cloud:{cid}"
+        for r in self.history.recent(400):
+            if r.get("session_id") == sid and not r.get("answer") and not r.get("dismissed"):
+                self.history.update(r["id"], dismissed=True)
+        url = str(url or "").strip()
+        if not re.match(r"^(https://claude\.ai/|claude://)", url):
+            url = ""  # only links into Claude are opened
+        opts = [" ".join(str(o).split())[:60] for o in (options if isinstance(options, list) else []) if str(o).strip()][:4]
+        proj = " ".join(str(project or "Claude project").split())[:60]
+        dec = {"question": question[:1].upper() + question[1:], "options": opts or ["Open"],
+               "context": "From a Claude app Project thread. Answer it there: each option opens the thread.",
+               "recommended": None}
+        item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": f"Needs you: {dec['question']}",
+                "cwd": "", "session_id": sid, "entrypoint": "claude-project", "project": proj, "headless": False,
+                "thread": " ".join(str(thread or "").split())[:80], "status": "queued", "message": dec["question"],
+                "host": {}, "kind": "project", "push_id": cid, "url": url, "decisions": [dec], "decision": dec}
+        silent = "muted" if self.muted else ("project muted" if self.quiet.get(proj, 0) > time.time() else "")
+        if silent:
+            item["status"] = f"not spoken: {silent}"
+            self.history.add(item)
+        else:
+            with self._cv:
+                self.history.add(item)
+                self._enqueue(item)
+                self._cv.notify_all()
+        log(f"call {item['id']} ({proj}) pushed from a cloud thread")
+        return item
+
+    def push_done(self, cid: str) -> bool:
+        """The thread saw the answer: close its pushed call."""
+        sid, hit = f"cloud:{' '.join(str(cid or '').split())[:120]}", False
+        for r in self.history.recent(400):
+            if r.get("session_id") == sid and not r.get("answer") and not r.get("dismissed"):
+                self.history.update(r["id"], answer="Done in the Claude app", answered_at=time.time(),
+                                    answered_in="thread")
+                hit = True
+        return hit
+
     def _close_moved_on(self, rows: list[dict], hours: float) -> None:
         """A found call (open question, needed action, permission prompt) closes once its session writes
         anything newer: the question was answered there, or the agent carried on."""
@@ -1056,6 +1102,14 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 it = vq.add_waiting(str(d.get("session_id") or ""), str(d.get("cwd") or ""),
                                     str(d.get("message") or ""), entrypoint=str(d.get("entrypoint") or ""), host=host)
                 return self._json(200, it or {"ok": False})
+            m = re.fullmatch(r"/calls/push/([^/]{1,120})/done", self.path)
+            if m:  # a pushed call's thread saw the answer
+                from urllib.parse import unquote
+                return self._json(200, {"ok": vq.push_done(unquote(m.group(1)))})
+            if self.path == "/calls/push":  # a cloud Claude app Project thread needs Yury
+                it = vq.push_call(str(d.get("id") or ""), str(d.get("project") or ""), str(d.get("thread") or ""),
+                                  str(d.get("question") or ""), d.get("options"), str(d.get("url") or ""))
+                return self._json(200 if it else 400, it or {"ok": False, "error": "id and question are required"})
             if self.path == "/show":  # the "Voice player" shortcut
                 vq.show_requested = True
                 return self._json(200, {"ok": True})

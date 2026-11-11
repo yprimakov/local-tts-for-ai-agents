@@ -18,6 +18,7 @@ Three sizes:
 from __future__ import annotations
 
 import math
+import os
 import re
 import sys
 import threading
@@ -2190,7 +2191,7 @@ class Widget:
 
     def _reply(self, call, text):
         """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
-        if call.get("kind") == "approve":  # approving happens where the session runs: open it
+        if call.get("kind") in ("approve", "project"):  # answered where the thread runs: open it
             self._open(call)
             return
         decs, d = self._draft(call)
@@ -2583,6 +2584,18 @@ class Widget:
     def _open(self, item):
         if not item:
             return
+        if item.get("kind") == "project":  # a cloud Project thread: open its link
+            if item.get("url"):
+                import webbrowser
+                webbrowser.open(item["url"])
+                self._toast("Opening the thread in Claude")
+            else:
+                try:
+                    os.startfile("claude://")  # no link: bring up the Claude app
+                except (OSError, AttributeError):
+                    pass
+                self._toast("Answer it in the Claude app: " + (item.get("project") or "the project"))
+            return
         msg = self.api.open_session(item)
         if not msg and item.get("session_id"):
             self._copy(self._resume_cmd(item))
@@ -2876,7 +2889,9 @@ class Widget:
             y += p(14)
             c.coords(self.call_rule, p(PAD), y, p(PAD) + p(20), y)
             c.coords(self.call_eyebrow, p(PAD) + p(28), y)
-            ew = self.F["mono"].measure("YOUR CALL")
+            eyebrow = "APP CALL" if call.get("kind") == "project" else "YOUR CALL"  # from a cloud Project thread
+            self._text(self.call_eyebrow, eyebrow)
+            ew = self.F["mono"].measure(eyebrow)
             x0 = p(PAD) + p(28) + ew + p(8)
             room = (Wp - p(PAD) - x0 - self.F["mono"].measure("Dismiss") - p(20)
                     - (self.F["mono"].measure("‹ 10/10 ›") + p(18) if len(self._calls) > 1 else 0))

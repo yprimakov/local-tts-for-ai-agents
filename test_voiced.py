@@ -209,6 +209,50 @@ class ApiTests(unittest.TestCase):
             vq.stop()
 
 
+class PushTests(unittest.TestCase):
+    def test_push_upsert_speak_done_and_restart(self):
+        path = Path(tempfile.mkdtemp()) / "h.jsonl"
+        vq = voiced.VoiceQueue(voiced.History(path), fake_synth, FakePlayer)
+        srv = voiced.make_server(vq, 0)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+        def post(p, body):
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{p}", data=json.dumps(body).encode(),
+                                         headers={"content-type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=2) as r:
+                    return r.status, json.loads(r.read())
+            except urllib.error.HTTPError as e:
+                return e.code, None
+        try:
+            body = {"id": "poc-1", "project": "Ember OS HomeLab", "thread": "Voice panel", "source": "cloud",
+                    "question": "how should threads reach the player?", "options": ["Push", "Leave out"],
+                    "url": "https://claude.ai/project/x"}
+            st, it = post("/calls/push", body)
+            self.assertEqual(st, 200)
+            self.assertEqual(it["decision"]["options"], ["Push", "Leave out"])
+            self.assertEqual(it["decision"]["question"], "How should threads reach the player?")
+            self.assertIn(it["id"], [q["id"] for q in vq.queue])                 # spoken like a reply
+            st, it2 = post("/calls/push", {**body, "question": "Newer?", "url": "https://evil.example/x"})
+            self.assertEqual(it2["url"], "")                                     # only links into Claude
+            open_ = [r for r in vq.history.recent(50) if r.get("push_id") == "poc-1"
+                     and not r.get("dismissed") and not r.get("answer")]
+            self.assertEqual([r["id"] for r in open_], [it2["id"]])              # upsert by id
+            self.assertEqual(post("/calls/push", {"id": "x"})[0], 400)
+            again = voiced.History(path)                                          # survives a restart
+            self.assertEqual(again.get(it2["id"])["push_id"], "poc-1")
+            self.assertTrue(post("/calls/push/poc-1/done", {})[1]["ok"])
+            self.assertEqual(vq.history.get(it2["id"])["answer"], "Done in the Claude app")
+            self.assertFalse(post("/calls/push/poc-1/done", {})[1]["ok"])
+            vq.set_muted(True)
+            st, it3 = post("/calls/push", {**body, "id": "poc-2"})
+            self.assertEqual(it3["status"], "not spoken: muted")                 # mute applies
+        finally:
+            srv.shutdown()
+            vq.stop()
+
+
 class WatchAnswersTests(unittest.TestCase):
     def test_multi_question_call_answered_in_thread_closes(self):
         import datetime as dt
