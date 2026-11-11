@@ -128,6 +128,30 @@ class ThemeTests(unittest.TestCase):
         w.c.dtag(item, "current")
         w.c.configure(cursor="")
 
+    def test_bundled_fonts_present_and_fallback(self):
+        fonts = Path(player.__file__).with_name("fonts")
+        for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",
+                     "VQSpaceGroteskBold", "VQFrauncesSemibold", "VQFrauncesMedium"):
+            self.assertTrue((fonts / f"{stem}.ttf").exists(), stem)
+        for lic in ("Inter", "SpaceGrotesk", "Fraunces"):
+            self.assertIn("Open Font License", (fonts / f"OFL-{lic}.txt").read_text(encoding="utf-8"))
+        w = self.w
+        fams = w._fams
+        for name, sets in player.THEME_FONTS.items():
+            for opts in sets:
+                self.assertIn(opts[0], fams, (name, opts[0]))       # the bundled face loaded
+        # a missing file falls back to the next name in the list
+        saved = set(fams)
+        try:
+            w._fams = fams - {"VQ Inter Bold", "VQ Inter"}
+            self.st.update(theme="graphite")
+            w._scale_setup()
+            self.assertNotIn(w.F["title"].actual("family"), ("VQ Inter Bold", "TkDefaultFont"))
+        finally:
+            w._fams = saved
+            self.st.update(theme="ember")
+            w._rebuild()
+
     def test_theme_colours_are_readable(self):
         for name, t in player.THEMES.items():
             with self.subTest(theme=name):

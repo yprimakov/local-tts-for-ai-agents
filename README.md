@@ -436,8 +436,9 @@ The Stop hook no longer plays audio itself. It posts each reply to one local dae
 
 ### The player (player.py)
 
-A floating capsule in the MadeFire style (Outfit, DM Sans and JetBrains Mono are bundled in `fonts/` and
-loaded for this process only). The ember orb plays and pauses; it breathes, and the card's rim glows, while a
+A floating capsule in the MadeFire style (Outfit, DM Sans, JetBrains Mono, Inter, Space Grotesk and Fraunces
+are bundled in `fonts/`, all SIL OFL with their licences, and loaded for this process only; Windows fonts are the
+fallback if a file is missing). The ember orb plays and pauses; it breathes, and the card's rim glows, while a
 reply is speaking. Three sizes:
 
 - **Capsule**: project, one line of the summary, progress, and a badge for calls waiting on you
@@ -487,7 +488,7 @@ The gear button opens Settings. Changes apply at once and are saved to
 
 | Setting | Choices | Default |
 | --- | --- | --- |
-| Theme (colours and type) | Ember (Outfit + DM Sans), Graphite (greys, silver buttons; Segoe UI Variable + Cascadia Mono), Midnight (navy, blue; Bahnschrift + Segoe UI), Daylight (warm cream; Sitka serif headings + DM Sans) | Ember |
+| Theme (colours and type) | Ember (Outfit + DM Sans), Graphite (greys, silver buttons; Inter), Midnight (navy, blue; Space Grotesk headings + Inter), Daylight (warm cream; Fraunces headings + DM Sans) | Ember |
 | Text size (scales the whole player) | S, M, L, XL, XXL | M |
 | Player width (independent of text size) | Narrow, Default, Wide, Wider (0.85x to 1.4x) | Default |
 | Opacity | 70, 80, 90, 100% | 100% |

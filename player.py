@@ -59,18 +59,25 @@ THEMES = {
                      GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(255, 250, 238),
                      ACC=("#F59E0B", "#F97316"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#1c1917", ACC_RGB=(217, 119, 6), SW_KNOB="#fffdf7"),
 }
-THEME_FONTS = {
+THEME_FONTS = {  # bundled OFL fonts first (fonts/), Windows fonts as fallback if a file is missing
     "ember": (("VQ Outfit Bold",), ("VQ Outfit Semibold",), ("VQ DM Sans",), ("VQ DM Sans Medium",),
               ("VQ JetBrains Mono",)),
-    "graphite": (("Segoe UI Variable Display Semib", "Segoe UI Semibold"),
-                 ("Segoe UI Variable Display Semib", "Segoe UI Semibold"),
-                 ("Segoe UI Variable Text", "Segoe UI"), ("Segoe UI Variable Text Semibold", "Segoe UI Semibold"),
-                 ("Cascadia Mono", "Consolas")),
-    "midnight": (("Bahnschrift SemiBold",), ("Bahnschrift SemiBold",), ("Segoe UI Variable Text", "Segoe UI"),
-                 ("Segoe UI Variable Text Semibold", "Segoe UI Semibold"), ("Cascadia Mono", "Consolas")),
-    "daylight": (("Sitka Heading Semibold", "Georgia"), ("Sitka Subheading Semibold", "Georgia"),
+    "graphite": (("VQ Inter Bold", "Segoe UI Variable Display Semib", "Segoe UI Semibold"),
+                 ("VQ Inter Semibold", "Segoe UI Variable Display Semib", "Segoe UI Semibold"),
+                 ("VQ Inter", "Segoe UI Variable Text", "Segoe UI"),
+                 ("VQ Inter Medium", "Segoe UI Variable Text Semibold", "Segoe UI Semibold"),
+                 ("VQ JetBrains Mono", "Cascadia Mono", "Consolas")),
+    "midnight": (("VQ Space Grotesk Bold", "Bahnschrift SemiBold"), ("VQ Space Grotesk Medium", "Bahnschrift SemiBold"),
+                 ("VQ Inter", "Segoe UI Variable Text", "Segoe UI"),
+                 ("VQ Inter Medium", "Segoe UI Variable Text Semibold", "Segoe UI Semibold"),
+                 ("VQ JetBrains Mono", "Cascadia Mono", "Consolas")),
+    "daylight": (("VQ Fraunces Semibold", "Sitka Heading Semibold", "Georgia"),
+                 ("VQ Fraunces Medium", "Sitka Subheading Semibold", "Georgia"),
                  ("VQ DM Sans",), ("VQ DM Sans Medium",), ("VQ JetBrains Mono",)),
 }
+# (headings, body): Inter, Space Grotesk and Fraunces run wider than Outfit/DM Sans at the same size, so a step
+# smaller keeps the layout's metrics (no new truncation at Narrow + L)
+THEME_FONT_SCALE = {"graphite": (0.95, 0.95), "midnight": (0.95, 0.95), "daylight": (0.94, 1.0)}
 THEME_NAMES = {"ember": "Ember", "graphite": "Graphite", "midnight": "Midnight", "daylight": "Daylight"}
 
 
@@ -934,8 +941,11 @@ class Widget:
         icon = next((n for n in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if n in fams), None)
         self._g = 0 if icon else 1
 
+        fh, fb = THEME_FONT_SCALE.get(self.cfg.get("theme"), (1.0, 1.0))
+
         def font(family, px, bold=False):
-            return tkfont.Font(root=root, family=family, size=-self.p(px), weight="bold" if bold else "normal")
+            k = 1.0 if family == mono else fh if family in (outfit_b, outfit) else fb
+            return tkfont.Font(root=root, family=family, size=-self.p(px * k), weight="bold" if bold else "normal")
         bold_fallback = outfit_b in ("Segoe UI Semibold", "DejaVu Sans")
         self.F = {
             "title": font(outfit_b, 17, bold_fallback), "name": font(outfit, 14.5),
