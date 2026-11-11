@@ -1148,10 +1148,15 @@ class Widget:
                    done=lambda: self._slides.pop(name, None))
 
     def _end_slides(self):
-        """A fresh layout put everything in place: forget glides that are still running."""
+        """A fresh layout put everything in place: forget glides that are still running. Header lines are not
+        laid out again (they stay where they were created), so their glides snap home instead: forgetting them
+        left each toast's leftover offset behind, and the subtitle drifted down over the call row."""
+        fixed = {f"slide:{self.cap_line}", f"slide:{self.pan_meta}"}
         for name in list(self._slides):
             self._anims.pop(name, None)
-        self._slides.clear()
+            left = self._slides.pop(name)
+            if name in fixed:
+                self.c.move(name.split(":", 1)[1], -left[0], -left[1])
 
     def _stagger_chips(self):
         p = self.p

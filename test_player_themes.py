@@ -150,6 +150,35 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(w.mode, "cap")
         self.assertIn("_double", w.c.tag_bind("bg", "<Double-Button-1>"))
 
+    def test_header_never_drifts_over_the_call_row(self):
+        """Toasts glide the subtitle; a relayout mid-glide must put it back, at every width and text size."""
+        w = self.w
+        try:
+            for width in (0.9, 1.0, 1.2, 1.4):
+                for size in (1.0, 1.3):
+                    with self.subTest(width=width, size=size):
+                        self.st.update(player_width=width, text_size=size)
+                        w._rebuild()
+                        w._set_mode("panel")
+                        w._tick_once(force=True)
+                        self.pump(0.3)
+                        home = w.c.coords(w.pan_meta)[1]
+                        for _ in range(12):                      # toast, then a new layout before it settles
+                            w._toast("Resume command copied")
+                            w.root.update()
+                            w._layout_key = None
+                            w._tick_once(force=True)
+                        self.pump(0.4)
+                        self.assertAlmostEqual(w.c.coords(w.pan_meta)[1], home, places=1)
+                        meta, title = w.c.bbox(w.pan_meta), w.c.bbox(w.pan_name)
+                        row = w.c.bbox("callfrom")
+                        self.assertIsNotNone(row)
+                        self.assertLessEqual(title[3], meta[1] + 2)  # subtitle under the title
+                        self.assertLessEqual(meta[3], row[1])         # and above the YOUR CALL row
+        finally:
+            self.st.update(player_width=1.0, text_size=1.0)
+            w._rebuild()
+
     def test_bundled_fonts_present_and_fallback(self):
         fonts = Path(player.__file__).with_name("fonts")
         for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",
