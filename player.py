@@ -36,6 +36,7 @@ OBSIDIAN = "#0b0b0d"
 INK = (255, 255, 255)                          # faint outlines and hover washes are this colour at low alpha
 GLOW_WARM, GLOW_COOL = (245, 158, 11), (20, 184, 166)  # the card's ambient light
 ACC, ACC_HI, ACC_INK, ACC_RGB = ("#F59E0B", "#EA580C"), ("#FBBF24", "#F59E0B"), "#0b0b0d", (245, 158, 11)  # filled buttons
+SW_KNOB = "#fffaf0"
 ORB_GLASS = (32, 27, 22)                       # the idle orb's dark glass
 
 # Themes set the card, text, hairline and ambient light. The pulse colour is its own setting.
@@ -44,19 +45,31 @@ THEMES = {
     "ember": dict(CARD="#121214", CARD_HI="#1a1a1d", HOVER="#1d1d21", HAIR="#29292e", FG="#f7f7f7",
                   BODY="#e2e2e6", MUTED="#8e8f92", FAINT="#7c7d83", EMBER="#FBBF24", INK=(255, 255, 255),
                   GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(32, 27, 22),
-                  ACC=("#F59E0B", "#EA580C"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#0b0b0d", ACC_RGB=(245, 158, 11)),
+                  ACC=("#F59E0B", "#EA580C"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#0b0b0d", ACC_RGB=(245, 158, 11), SW_KNOB="#fffaf0"),
     "graphite": dict(CARD="#161616", CARD_HI="#1f1f1f", HOVER="#242424", HAIR="#2e2e2e", FG="#fafafa",
                      BODY="#e5e5e5", MUTED="#a3a3a3", FAINT="#8a8a8a", EMBER="#f5f5f5", INK=(255, 255, 255),
                      GLOW_WARM=(255, 255, 255), GLOW_COOL=(160, 160, 160), ORB_GLASS=(30, 30, 30),
-                     ACC=("#f5f5f5", "#cfcfcf"), ACC_HI=("#ffffff", "#e5e5e5"), ACC_INK="#111111", ACC_RGB=(229, 229, 229)),
+                     ACC=("#f5f5f5", "#cfcfcf"), ACC_HI=("#ffffff", "#e5e5e5"), ACC_INK="#111111", ACC_RGB=(229, 229, 229), SW_KNOB="#141414"),
     "midnight": dict(CARD="#0d1424", CARD_HI="#131c30", HOVER="#18223a", HAIR="#23304a", FG="#f1f5f9",
                      BODY="#dbe4f0", MUTED="#94a3b8", FAINT="#7d8aa0", EMBER="#93c5fd", INK=(255, 255, 255),
                      GLOW_WARM=(59, 130, 246), GLOW_COOL=(14, 165, 233), ORB_GLASS=(17, 26, 46),
-                     ACC=("#60a5fa", "#3b82f6"), ACC_HI=("#93c5fd", "#60a5fa"), ACC_INK="#0b1220", ACC_RGB=(96, 165, 250)),
+                     ACC=("#60a5fa", "#3b82f6"), ACC_HI=("#93c5fd", "#60a5fa"), ACC_INK="#0b1220", ACC_RGB=(96, 165, 250), SW_KNOB="#f8fafc"),
     "daylight": dict(CARD="#f9f5ea", CARD_HI="#fffdf7", HOVER="#f1ebdc", HAIR="#e3dccb", FG="#1c1917",
                      BODY="#36302a", MUTED="#5c564f", FAINT="#6b645c", EMBER="#a1520a", INK=(60, 40, 10),
                      GLOW_WARM=(245, 158, 11), GLOW_COOL=(20, 184, 166), ORB_GLASS=(255, 250, 238),
-                     ACC=("#F59E0B", "#F97316"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#1c1917", ACC_RGB=(217, 119, 6)),
+                     ACC=("#F59E0B", "#F97316"), ACC_HI=("#FBBF24", "#F59E0B"), ACC_INK="#1c1917", ACC_RGB=(217, 119, 6), SW_KNOB="#fffdf7"),
+}
+THEME_FONTS = {
+    "ember": (("VQ Outfit Bold",), ("VQ Outfit Semibold",), ("VQ DM Sans",), ("VQ DM Sans Medium",),
+              ("VQ JetBrains Mono",)),
+    "graphite": (("Segoe UI Variable Display Semib", "Segoe UI Semibold"),
+                 ("Segoe UI Variable Display Semib", "Segoe UI Semibold"),
+                 ("Segoe UI Variable Text", "Segoe UI"), ("Segoe UI Variable Text Semibold", "Segoe UI Semibold"),
+                 ("Cascadia Mono", "Consolas")),
+    "midnight": (("Bahnschrift SemiBold",), ("Bahnschrift SemiBold",), ("Segoe UI Variable Text", "Segoe UI"),
+                 ("Segoe UI Variable Text Semibold", "Segoe UI Semibold"), ("Cascadia Mono", "Consolas")),
+    "daylight": (("Sitka Heading Semibold", "Georgia"), ("Sitka Subheading Semibold", "Georgia"),
+                 ("VQ DM Sans",), ("VQ DM Sans Medium",), ("VQ JetBrains Mono",)),
 }
 THEME_NAMES = {"ember": "Ember", "graphite": "Graphite", "midnight": "Midnight", "daylight": "Daylight"}
 
@@ -104,12 +117,27 @@ def mix(a: str, b: str, t: float) -> str:
     return "#%02x%02x%02x" % tuple(round(x + (y - x) * t) for x, y in zip(_rgb(a), _rgb(b)))
 
 
-def ease_out(t: float) -> float:
-    return 1 - (1 - t) ** 3
+def bezier(x1: float, y1: float, x2: float, y2: float):
+    """A CSS cubic-bezier easing as a function of t in [0, 1]."""
+    def at(a, b, u):
+        return 3 * a * u * (1 - u) ** 2 + 3 * b * u * u * (1 - u) + u ** 3
+
+    def f(t: float) -> float:
+        if t <= 0 or t >= 1:
+            return min(1.0, max(0.0, t))
+        lo, hi = 0.0, 1.0
+        for _ in range(22):                           # solve x(u) = t by bisection
+            mid = (lo + hi) / 2
+            if at(x1, x2, mid) < t:
+                lo = mid
+            else:
+                hi = mid
+        return at(y1, y2, (lo + hi) / 2)
+    return f
 
 
-def ease_in_out(t: float) -> float:
-    return 4 * t ** 3 if t < 0.5 else 1 - (-2 * t + 2) ** 3 / 2
+ease_out = bezier(0.23, 1, 0.32, 1)        # enters, presses, anything that answers the user
+ease_in_out = bezier(0.77, 0, 0.175, 1)    # things moving on screen
 
 
 def when(ts: float) -> str:
@@ -174,7 +202,8 @@ class Art:
         return self.get(("orb", round(level, 3), dim), lambda: self.orb_pil(level, dim))
 
     def orb_pil(self, level: float, dim: bool = False):
-        key = ("orb_pil", round(level, 3), dim)
+        level = round(level, 2)                       # bounded cache: 101 levels at most
+        key = ("orb_pil", level, dim)
         if key in self._cache:
             return self._cache[key]
 
@@ -220,20 +249,22 @@ class Art:
         return self._cache[key]
 
     def knob(self):
+        col, glow = ACC_HI[0], ACC_RGB
+
         def make():
             I, D, F = self.I, self.D, self.F
             d, g = self.p(11), self.p(8)
             size = d + 2 * g
             out = I.new("RGBA", (size, size), (0, 0, 0, 0))
             halo = I.new("RGBA", (size, size), (0, 0, 0, 0))
-            D.Draw(halo).ellipse((g, g, g + d, g + d), fill=(245, 158, 11, 200))
+            D.Draw(halo).ellipse((g, g, g + d, g + d), fill=(*glow, 200))
             out.alpha_composite(halo.filter(F.GaussianBlur(g / 2)))
             n = d * self.SS
             ball = I.new("RGBA", (n, n), (0, 0, 0, 0))
-            D.Draw(ball).ellipse((0, 0, n - 1, n - 1), fill=self._rgba("#FBBF24"))
+            D.Draw(ball).ellipse((0, 0, n - 1, n - 1), fill=self._rgba(col))
             out.alpha_composite(self._down(ball, d, d), (g, g))
             return out
-        return self.get("knob", make)
+        return self.get(("knob", col), make)
 
     def circle(self, d: float, fill=None, outline=None):
         def make():
@@ -320,7 +351,7 @@ class Art:
             k = SS * (2 if chosen else 1)
             D.Draw(ring).rounded_rectangle((0, 0, n_w - 1, n_h - 1), radius=r, fill=255)
             D.Draw(ring).rounded_rectangle((k, k, n_w - 1 - k, n_h - 1 - k), radius=r - k, fill=0)
-            im.paste(I.new("RGBA", (n_w, n_h), self._rgba(AMBER if chosen else t["HAIR"])), (0, 0), ring)
+            im.paste(I.new("RGBA", (n_w, n_h), self._rgba(ACC[0] if chosen else t["HAIR"])), (0, 0), ring)
             return self._down(im, w, h)
         return self.get(("theme_card", w, h, tuple(sorted((k, str(v)) for k, v in t.items())), chosen), make)
 
@@ -545,20 +576,23 @@ class CornerGlass:
 
 
 class MiniOrb:
-    """The minimized player: a small ember orb where the player's orb was. It pulses while speaking and
-    shows how many calls wait. Click restores the player; drag moves the orb.
+    """The minimized player: a glossy ember orb docked at the nearest screen edge. It pulses while speaking,
+    shows waiting calls as a small pill, and grows a little on hover. Click restores the player where it was;
+    drag moves the orb, and it settles on the nearest edge again.
     On Windows the Tk window only gives the click area (a binary disk); a layered window draws the
-    antialiased orb, its glow and the badge on top, so the edge is smooth."""
-    BALL = 40  # logical px
+    antialiased orb, its shadow, rim and badge on top, so every edge is smooth."""
+    BALL = 40    # logical px
+    MARGIN = 10  # gap to the screen edge
 
-    def __init__(self, w, cx: int, cy: int):
+    def __init__(self, w, cx: int, cy: int, dock: bool = True):
         self.w, tk = w, w.tk
-        self.scale = self.BALL / ORB
-        full = w.art.orb_pil(0, dim=True)
-        self.size = round(full.width * self.scale)
-        self.ball = round(w.p(ORB) * self.scale)
+        self.ball = w.p(self.BALL)
+        self.size = round(self.ball * 2.1)          # halo, shadow, hover growth and the badge fit inside
         self.cx, self.cy = cx, cy
         self.state = None
+        self.hover = 0.0
+        self._cache = {}
+        self._tip_job = None
         t = self.top = tk.Toplevel(w.root)
         t.overrideredirect(True)
         t.attributes("-topmost", True)
@@ -577,6 +611,8 @@ class MiniOrb:
         c.bind("<B1-Motion>", self._move)
         c.bind("<ButtonRelease-1>", self._release)
         c.bind("<Button-3>", w._menu)
+        c.bind("<Enter>", lambda e: self._hover(True))
+        c.bind("<Leave>", lambda e: self._hover(False))
         self.glass = None
         if sys.platform == "win32":
             try:
@@ -588,6 +624,28 @@ class MiniOrb:
         t.deiconify()
         if self.glass:
             self.glass.u.ShowWindow(self.glass.hw[0], 4)
+        if dock:
+            self.dock()
+
+    # ---------------------------------------------------------- where it sits
+    def _target(self, cx, cy):
+        """The docked spot for a centre point: the nearer side edge of that monitor, height kept."""
+        l, t, r, b = self.w._work_area(cx, cy)
+        half = self.ball // 2 + self.w.p(self.MARGIN)
+        x = l + half if cx < (l + r) / 2 else r - half
+        return x, max(t + half, min(b - half, cy))
+
+    def dock(self):
+        """Slide to the nearest edge (ease-out, ~240 ms)."""
+        x0, y0 = self.cx, self.cy
+        x1, y1 = self._target(x0, y0)
+        if (x1, y1) == (x0, y0):
+            return
+
+        def step(t):
+            self.cx, self.cy = round(x0 + (x1 - x0) * t), round(y0 + (y1 - y0) * t)
+            self._place()
+        self.w._anim("minidock", 0.24, step, ease=ease_out)
 
     def _xy(self):
         return self.cx - self.size // 2, self.cy - self.size // 2
@@ -595,63 +653,132 @@ class MiniOrb:
     def _place(self):
         x, y = self._xy()
         self.top.geometry(f"{self.size}x{self.size}+{x}+{y}")
-        self._paint(force=True)
+        self._paint()
 
+    # ---------------------------------------------------------- look
     def render(self, k: float, dim: bool, calls: int):
-        state = (round(k, 3), dim, calls)
+        state = (round(0.0 if dim else k, 2), calls)
         if state != self.state:
             self.state = state
             self._paint()
 
-    def _paint(self, force=False):
-        if not self.state:
-            self.state = (0, True, 0)
-        k, dim, calls = self.state
-        w = self.w
-        im = w.art.orb_pil(k, dim=dim).resize((self.size, self.size), w.art.I.LANCZOS)
+    def _image(self):
+        k, calls = self.state or (0.0, 0)
+        h = round(self.hover, 2)
+        rim = self.w.cfg.get("rim_color") or AMBER
+        key = (k, calls, h, rim)
+        if key in self._cache:
+            return self._cache[key]
+        if len(self._cache) > 160:
+            self._cache.clear()
+        art, p = self.w.art, self.w.p
+        I, D, F, SS = art.I, art.D, art.F, 4
+        n = self.size
+        out = I.new("RGBA", (n, n), (0, 0, 0, 0))
+        d = self.ball * (1 + 0.07 * h)               # grows a little on hover
+        c0 = n / 2
+        # soft shadow under the orb
+        sh = I.new("RGBA", (n, n), (0, 0, 0, 0))
+        so = p(2) + p(1) * h
+        D.Draw(sh).ellipse((c0 - d / 2 + p(1), c0 - d / 2 + so, c0 + d / 2 - p(1), c0 + d / 2 + so),
+                           fill=(0, 0, 0, 110))
+        out.alpha_composite(sh.filter(F.GaussianBlur(p(3) + p(1) * h)))
+        # the glossy ember orb (with its halo, which breathes with the voice)
+        full = art.orb_pil(k, dim=False)
+        sc = d / self.w.p(ORB)
+        o = full.resize((max(1, round(full.width * sc)), max(1, round(full.height * sc))), I.LANCZOS)
+        out.alpha_composite(o, (round(c0 - o.width / 2), round(c0 - o.height / 2)))
+        # gloss and a thin rim in the pulse colour, drawn large and scaled down (antialiased)
+        m = round(d * SS)
+        top = I.new("RGBA", (m, m), (0, 0, 0, 0))
+        dr = D.Draw(top)
+        dr.ellipse((m * 0.2, m * 0.08, m * 0.62, m * 0.4), fill=(255, 255, 255, 70))
+        top = top.filter(F.GaussianBlur(m * 0.05))
+        dr = D.Draw(top)
+        rr, rg, rb, _ = Art._rgba(rim)
+        dr.ellipse((0, 0, m - 1, m - 1), outline=(rr, rg, rb, int(150 + 100 * k)), width=max(SS, round(1.4 * SS)))
+        top = top.resize((round(d), round(d)), I.LANCZOS)
+        out.alpha_composite(top, (round(c0 - d / 2), round(c0 - d / 2)))
         if calls:
-            I, D = w.art.I, w.art.D
-            SS = 4
-            bd = round(self.size * 0.36)
-            b = I.new("RGBA", (bd * SS, bd * SS), (0, 0, 0, 0))
-            dr = D.Draw(b)
-            dr.ellipse((0, 0, bd * SS - 1, bd * SS - 1), fill=Art._rgba(AMBER))
+            label = str(calls) if calls < 10 else "9+"
             try:
                 from PIL import ImageFont
-                font = ImageFont.truetype(str(_HERE / "fonts" / "VQJetBrainsMono.ttf"), int(bd * SS * 0.62))
+                font = ImageFont.truetype(str(_HERE / "fonts" / "VQJetBrainsMono.ttf"), round(p(10) * SS))
             except Exception:
                 font = None
-            dr.text((bd * SS / 2, bd * SS / 2), str(min(calls, 9)), fill=Art._rgba(OBSIDIAN), font=font, anchor="mm")
-            b = b.resize((bd, bd), I.LANCZOS)
-            im.alpha_composite(b, (self.size - bd - round(self.size * 0.12), round(self.size * 0.12)))
+            bh = p(16) * SS
+            tw = D.Draw(I.new("RGBA", (1, 1))).textlength(label, font=font) if font else bh * 0.5
+            bw = max(bh, round(tw + p(10) * SS))
+            pill = I.new("RGBA", (bw, bh), (0, 0, 0, 0))
+            dp = D.Draw(pill)
+            dp.rounded_rectangle((0, 0, bw - 1, bh - 1), radius=bh // 2, fill=Art._rgba(OBSIDIAN),
+                                 outline=(rr, rg, rb, 230), width=max(SS, round(1.2 * SS)))
+            dp.text((bw / 2, bh / 2), label, fill=(255, 255, 255, 255), font=font, anchor="mm")
+            pill = pill.resize((round(bw / SS), round(bh / SS)), I.LANCZOS)
+            px = round(c0 + d * 0.34 - pill.width / 2)
+            py = round(c0 - d * 0.5 - pill.height * 0.15)
+            out.alpha_composite(pill, (min(n - pill.width, px), max(0, py)))
+        self._cache[key] = out
+        return out
+
+    def _paint(self):
+        if not self.state:
+            self.state = (0.0, 0)
+        im = self._image()
         if self.glass:
             pm = im.convert("RGBa")
             rr, gg, bb, aa = pm.split()
             x, y = self._xy()
-            self.glass.blit(0, x, y, self.size, self.size, w.art.I.merge("RGBa", (bb, gg, rr, aa)).tobytes(),
+            self.glass.blit(0, x, y, self.size, self.size, self.w.art.I.merge("RGBa", (bb, gg, rr, aa)).tobytes(),
                             alpha=1.0)
             self.c.itemconfigure(self.img, state="hidden")
         else:
-            self._photo = w.art.TK.PhotoImage(im)
+            self._photo = self.w.art.TK.PhotoImage(im)
             self.c.itemconfigure(self.img, image=self._photo)
+
+    # ---------------------------------------------------------- hover, click, drag
+    def _hover(self, on: bool):
+        h0, h1 = self.hover, (1.0 if on else 0.0)
+
+        def step(t):
+            self.hover = h0 + (h1 - h0) * t
+            self._paint()
+        self.w._anim("minihover", 0.16 if on else 0.12, step, ease=ease_out)
+        if self._tip_job:
+            self.w.root.after_cancel(self._tip_job)
+            self._tip_job = None
+        self.w._tip_hide()
+        if on:
+            calls = (self.state or (0, 0))[1]
+            text = "Ember Voice Player" + (f" · {calls} call{'s' if calls != 1 else ''}" if calls else "")
+            self._tip_job = self.w.root.after(450, lambda: (setattr(self, "_tip_job", None), self.w._tip_show(text)))
 
     def _press(self, e):
         self._down = (e.x_root, e.y_root, self.cx, self.cy)
         self._moved = False
+        self.w._anims.pop("minidock", None)
 
     def _move(self, e):
         x0, y0, cx, cy = self._down
         if abs(e.x_root - x0) + abs(e.y_root - y0) > 4:
             self._moved = True
+            self.w._tip_hide()
         if self._moved:
             self.cx, self.cy = cx + e.x_root - x0, cy + e.y_root - y0
             self._place()
 
     def _release(self, e):
-        if not getattr(self, "_moved", False):
+        if getattr(self, "_moved", False):
+            self.dock()
+        else:
             self.w.restore()
 
     def destroy(self):
+        if self._tip_job:
+            self.w.root.after_cancel(self._tip_job)
+        self.w._anims.pop("minidock", None)
+        self.w._anims.pop("minihover", None)
+        self.w._tip_hide()
         if self.glass:
             self.glass.destroy()
         try:
@@ -762,6 +889,7 @@ class Widget:
         self._lib_sig = None
         self._open_row = None
         self._toast_until = 0.0
+        self._slides, self._last_key = {}, 0.0
         self._tip = None
         self._tip_job = None
         self._visible = False
@@ -797,17 +925,18 @@ class Widget:
 
         def fam(*names):
             return next((n for n in names if n in fams), "TkDefaultFont")
-        outfit_b = fam("VQ Outfit Bold", "Segoe UI Semibold", "DejaVu Sans")
-        outfit = fam("VQ Outfit Semibold", "Segoe UI Semibold", "DejaVu Sans")
-        dm = fam("VQ DM Sans", "Segoe UI", "DejaVu Sans")
-        dm_m = fam("VQ DM Sans Medium", "Segoe UI Semibold", "DejaVu Sans")
-        mono = fam("VQ JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono")
+        tf = THEME_FONTS.get(self.cfg.get("theme")) or THEME_FONTS["ember"]
+        outfit_b = fam(*tf[0], "VQ Outfit Bold", "Segoe UI Semibold", "DejaVu Sans")
+        outfit = fam(*tf[1], "VQ Outfit Semibold", "Segoe UI Semibold", "DejaVu Sans")
+        dm = fam(*tf[2], "VQ DM Sans", "Segoe UI", "DejaVu Sans")
+        dm_m = fam(*tf[3], "VQ DM Sans Medium", "Segoe UI Semibold", "DejaVu Sans")
+        mono = fam(*tf[4], "VQ JetBrains Mono", "Cascadia Mono", "Consolas", "DejaVu Sans Mono")
         icon = next((n for n in ("Segoe Fluent Icons", "Segoe MDL2 Assets") if n in fams), None)
         self._g = 0 if icon else 1
 
         def font(family, px, bold=False):
             return tkfont.Font(root=root, family=family, size=-self.p(px), weight="bold" if bold else "normal")
-        bold_fallback = outfit_b.startswith("Segoe") or outfit_b.startswith("DejaVu")
+        bold_fallback = outfit_b in ("Segoe UI Semibold", "DejaVu Sans")
         self.F = {
             "title": font(outfit_b, 17, bold_fallback), "name": font(outfit, 14.5),
             "q": font(outfit, 15), "body": font(dm, 14), "line": font(dm, 12.5), "meta": font(dm, 11.5),
@@ -840,7 +969,7 @@ class Widget:
         if self._mini:
             cx, cy = self._mini.cx, self._mini.cy
             self._mini.destroy()
-            self._mini = MiniOrb(self, cx, cy)
+            self._mini = MiniOrb(self, cx, cy, dock=False)
         if self._glass:
             self._glass._cache.clear()
             self._glass_key = None
@@ -902,9 +1031,65 @@ class Widget:
         proj, t = last[0].get("project"), when(last[0]["ts"])
         return (f"Last: {proj} · {t}", f"{proj} · {t}", f"Last: {t}")
 
-    def _anim(self, name, dur, fn, ease=ease_out, done=None):
-        self._anims[name] = {"t0": time.perf_counter(), "dur": max(0.001, dur), "fn": fn, "ease": ease, "done": done}
+    def _reduced(self) -> bool:
+        if self.cfg.get("reduce_motion"):
+            return True
+        if getattr(self, "_win_anim", None) is None:
+            self._win_anim = True
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    v = ctypes.c_int(1)
+                    ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(v), 0)  # client-area animation
+                    self._win_anim = bool(v.value)
+                except Exception:
+                    pass
+        return not self._win_anim
+
+    def _anim(self, name, dur, fn, ease=ease_out, done=None, delay=0.0):
+        if self._reduced() and name not in ("alpha", "reveal"):  # reduced motion: fades stay, movement jumps
+            fn(1.0)
+            self._anims.pop(name, None)
+            if done:
+                done()
+            return
+        self._anims[name] = {"t0": time.perf_counter() + delay, "dur": max(0.001, dur), "fn": fn, "ease": ease,
+                             "done": done}
         self._kick()
+
+    def _glide(self, tag, dx, dy, dur=0.2, delay=0.0):
+        """Offset `tag` by (dx, dy) and glide it back to where the layout put it (ease-out). A new slide of the
+        same group first snaps the old one home, so nothing drifts. Skipped right after a key press."""
+        if time.time() - self._last_key < 0.4 or not self._visible:
+            return
+        name = f"slide:{tag}"
+        left = self._slides.pop(name, None)
+        if left:
+            self.c.move(tag, -left[0], -left[1])
+            self._anims.pop(name, None)
+        self.c.move(tag, dx, dy)
+        self._slides[name] = [dx, dy]
+
+        def step(t):
+            cur = self._slides.get(name)
+            if not cur:
+                return
+            tx, ty = dx * (1 - t), dy * (1 - t)
+            self.c.move(tag, tx - cur[0], ty - cur[1])
+            cur[0], cur[1] = tx, ty
+        self._anim(name, dur, step, ease=ease_out, delay=delay,
+                   done=lambda: self._slides.pop(name, None))
+
+    def _end_slides(self):
+        """A fresh layout put everything in place: forget glides that are still running."""
+        for name in list(self._slides):
+            self._anims.pop(name, None)
+        self._slides.clear()
+
+    def _stagger_chips(self):
+        p = self.p
+        for n in range(len(self.chips)):
+            self._glide(f"chip{n}", 0, p(5), dur=0.22, delay=0.025 * n)
 
     def _kick(self):
         if self._frame_job is None:
@@ -914,7 +1099,10 @@ class Widget:
         self._frame_job = None
         now = time.perf_counter()
         for name, a in list(self._anims.items()):
-            t = min(1.0, (now - a["t0"]) / a["dur"])
+            t = (now - a["t0"]) / a["dur"]
+            if t < 0:                                  # staggered: not started yet
+                continue
+            t = min(1.0, t)
             try:
                 a["fn"](a["ease"](t))
             except Exception as e:
@@ -938,6 +1126,8 @@ class Widget:
         c.bind("<Enter>", lambda e: self._set_cap_hover(True), add="+")
         c.bind("<Leave>", lambda e: self._set_cap_hover(False), add="+")
         self._cap_hover = False
+        self._set_off, self._set_max, self._set_bar_on, self._bar_job = 0, 0, False, None
+        c.bind("<MouseWheel>", self._on_wheel, add="+")
         Wp = self.Wp
 
         # card: fill, rim, ambient light, corners on top (disabled: clicks fall through)
@@ -1124,6 +1314,7 @@ class Widget:
     def _key(self, fn):
         if self.root.focus_get() is self.entry:
             return
+        self._last_key = time.time()                  # keyboard actions never animate
         fn()
 
     def _icon_button(self, name, glyph, cmd, tip):
@@ -1228,8 +1419,8 @@ class Widget:
         s = min(max(r, 1 + n * step), w // 2, h // 2)  # corner square: the whole curve of every ring
         for i, lines in enumerate(self._rings):
             y = 1 + i * step + step / 2
-            for ln, xy in zip(lines, ((s, y, w - s, y), (s, h - 1 - y, w - s, h - 1 - y),
-                                      (y, s, y, h - s), (w - 1 - y, s, w - 1 - y, h - s))):
+            for ln, xy in zip(lines, ((s, y, w - s, y), (s, h - y, w - s, h - y),     # mirror of the top/left band
+                                      (y, s, y, h - s), (w - y, s, w - y, h - s))):
                 c.coords(ln, *xy)
                 if cols[i]:
                     c.itemconfigure(ln, fill=cols[i], state="disabled")
@@ -1247,6 +1438,8 @@ class Widget:
         if getattr(self, "_rings", None) and self._ring_k > 0.01:
             self._glow_rings(self._ring_k, recolor=False)
         c, Wp = self.c, self.Wp
+        if h > int(c.cget("height")):                # the canvas must cover the whole window
+            c.configure(height=h + self.p(200))
         c.coords(self.card, 0, 0, Wp, h)
         c.coords(self.rim_l, 0, 0, 0, h)
         c.coords(self.rim_r, Wp - 1, 0, Wp - 1, h)
@@ -1281,7 +1474,8 @@ class Widget:
             self._anims.pop("height", None)
             self._set_height(target)
             return
-        self._anim("height", 0.26, lambda t: self._set_height(start + (target - start) * t), ease=ease_out)
+        self._anim("height", 0.24 if target > start else 0.17,
+                   lambda t: self._set_height(start + (target - start) * t), ease=ease_out)
 
     def _fade_window(self, to: float, done=None, dur=0.18):
         try:
@@ -1394,11 +1588,9 @@ class Widget:
         self._kick()
 
     def restore(self):
-        """Back from the orb to the player, which moves so its orb lands where the small orb was."""
+        """Back from the orb to the player, exactly where it was (same spot, same size) before minimizing."""
         self.cfg.update(minimized=False)
         if self._mini:
-            ox, oy = self._orb_offset()
-            self._xy = (self._mini.cx - ox, self._mini.cy - oy)
             self._mini.destroy()
             self._mini = None
             if not self._on_screen():
@@ -1438,6 +1630,34 @@ class Widget:
             return bool(u.MonitorFromRect(ctypes.byref(rc), 0))  # MONITOR_DEFAULTTONULL
         except Exception:
             return True
+
+    def _work_area(self, x=None, y=None):
+        """(left, top, right, bottom) of the work area (no taskbar) of the monitor at x, y (default: the player)."""
+        if x is None:
+            x, y = self._xy
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                from ctypes import wintypes as W
+
+                class MI(ctypes.Structure):
+                    _fields_ = [("cbSize", W.DWORD), ("rcMonitor", W.RECT), ("rcWork", W.RECT), ("dwFlags", W.DWORD)]
+                u = ctypes.windll.user32
+                u.MonitorFromRect.restype = ctypes.c_void_p
+                rc = W.RECT(x, y, x + self.p(60), y + self.p(40))
+                mon = u.MonitorFromRect(ctypes.byref(rc), 2)  # MONITOR_DEFAULTTONEAREST
+                mi = MI()
+                mi.cbSize = ctypes.sizeof(MI)
+                if u.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi)):
+                    w = mi.rcWork
+                    return w.left, w.top, w.right, w.bottom
+            except Exception:
+                pass
+        return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+    def _room(self) -> int:
+        """The tallest the player may grow from where it is without leaving the work area."""
+        return max(self.p(240), self._work_area()[3] - self._xy[1] - self.p(12))
 
     def _alpha(self) -> float:
         return float(self.cfg.get("opacity"))
@@ -1507,6 +1727,8 @@ class Widget:
             self.lib = False
             self.view = "now"
             self.c.delete("set")
+            self.c.delete("setmask")
+            self._set_off = self._set_max = 0
             self._auto_open = None
             if self.root.focus_get() is self.entry:
                 self.root.focus_set()
@@ -1553,6 +1775,10 @@ class Widget:
             self._reveal("cap")
         else:
             self._reveal("pan")
+            if not instant:
+                for tag in ("play", "ask"):
+                    self._glide(tag, 0, -self.p(8), dur=0.24)
+                self._stagger_chips()
 
     def _set_cap_hover(self, on: bool):
         """Hovering the capsule shows a minimize button in the badge's place."""
@@ -1725,6 +1951,13 @@ class Widget:
             self._call_ix = (self._call_ix + d) % len(self._calls)
             self._layout_key = None
             self._tick_once()
+            self._step_motion(d)
+
+    def _step_motion(self, direction):
+        """The next question comes in from the side it lives on: a few px and a fade, chips staggered."""
+        self._glide("ask", self.p(10) * (1 if direction > 0 else -1), 0, dur=0.2)
+        self._reveal("ask")
+        self._stagger_chips()
 
     def _call_id(self, item):
         return item.get("replay_of") or item["id"]
@@ -1796,12 +2029,15 @@ class Widget:
         d["ix"] = later[0] if later else (rest[0] if rest else len(decs))
         self._layout_key = None
         self._tick_once()
+        self._step_motion(1 if d["ix"] > i else -1)
 
     def _goto_question(self, call, i):
         _, d = self._draft(call)
+        back = i < d["ix"]
         d["ix"] = i
         self._layout_key = None
         self._tick_once()
+        self._step_motion(-1 if back else 1)
 
     def _send_all(self, call):
         decs, d = self._draft(call)
@@ -2194,6 +2430,8 @@ class Widget:
         self._fill(self.cap_line, EMBER)
         self._text(self.pan_meta, self._ellipsize(text, self.F["meta"], self.Wp - self.p(78) - self.p(138)))
         self._fill(self.pan_meta, EMBER)
+        for item in (self.cap_line, self.pan_meta):
+            self._glide(item, 0, self.p(5), dur=0.2)
 
     def _replay(self, item_id):
         if self.vq.muted:
@@ -2422,6 +2660,7 @@ class Widget:
             c.itemconfigure(self.pan_arrow, state="normal" if show else "hidden")
             return
         self._layout_key = key
+        self._end_slides()
 
         # full layout: positions for everything below the header
         y = p(PAD + ORB + 16)
@@ -2532,7 +2771,7 @@ class Widget:
         if self.lib:
             y += p(10)
             hl = self._render_library(lib_rows, bg_count, q)
-            room = self.root.winfo_screenheight() - self._xy[1] - p(48) - (y + p(R_PANEL))
+            room = self._room() - (y + p(R_PANEL))
             h = max(p(120), min(p(LIST_MAX), hl, room))
             c.coords(self.lst_win, p(PAD), y)
             c.itemconfigure(self.lst_win, height=h, state="normal")
@@ -2554,6 +2793,8 @@ class Widget:
     def _toggle_settings(self):
         self.view = "now" if self.view == "settings" else "settings"
         self.c.delete("set")
+        self.c.delete("setmask")
+        self._set_off = self._set_max = 0
         self._layout_key = None
         self._fill(self.btn["gear"]["g"], self._btn_color("gear"))
         if self.mode == "cap":
@@ -2562,6 +2803,11 @@ class Widget:
             self._layout_key = None
         self._tick_once(force=True)
         self._reveal("set" if self.view == "settings" else "pan")
+        if self.view == "settings":
+            self._glide("set", self.p(14), 0, dur=0.22)
+        else:
+            for tag in ("play", "ask"):
+                self._glide(tag, -self.p(10), 0, dur=0.18)
 
     def _set(self, key, value):
         """Change one setting and apply it right away."""
@@ -2607,6 +2853,7 @@ class Widget:
         if key == self._layout_key and not force:
             return
         self._layout_key = key
+        self._end_slides()
         c.itemconfigure("pan", state="normal")
         for tag in ("play", "ask", "libtoggle"):
             c.itemconfigure(tag, state="hidden")
@@ -2652,7 +2899,7 @@ class Widget:
                                  tags=("set", tag))
             dots = []
             for i, x in enumerate(xs):
-                d = c.create_image(x, ty, image=self.art.circle(7, fill=Art._rgba(AMBER if i <= ix else HAIR)),
+                d = c.create_image(x, ty, image=self.art.circle(7, fill=Art._rgba(ACC[0] if i <= ix else HAIR)),
                                    tags=("set", tag))
                 dots.append(d)
                 c.create_text(x, ty + p(18), text=self._short(key, stops[i]), font=self.F["mono_s"],
@@ -2681,7 +2928,7 @@ class Widget:
             cy = y + p(11) if not hint else y + p(16)
             c.create_image(x1, cy, anchor="e", image=img, tags=("set", tag))
             kx = x1 - p(10) if on else x1 - sw + p(10)
-            c.create_image(kx, cy, image=self.art.circle(14, fill=Art._rgba(FG if on else MUTED)), tags=("set", tag))
+            c.create_image(kx, cy, image=self.art.circle(14, fill=Art._rgba(SW_KNOB if on else MUTED)), tags=("set", tag))
             c.tag_bind(tag, "<Button-1>", lambda e: self._set(key, not on))
             c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
@@ -2776,6 +3023,7 @@ class Widget:
         y = swatches("rim_color", "Pulse color", y)
         y = slider("glow_size", "Glow size", [0, 6, 12, 18, 24], ["Rim only", "Small", "Medium", "Large", "Largest"], y)
         y = toggle("pulse_with_voice", "Pulse with the voice", "Off: a slow, steady breath while speaking", y)
+        y = toggle("reduce_motion", "Reduce motion", "Panels change at once; fades stay", y)
         y += p(14)
 
         # voice
@@ -2833,6 +3081,7 @@ class Widget:
         y = fy + p(16) + p(R_PANEL)
         c.tag_raise("set")
         c.tag_lower("sethit", self.glow_cap)  # hit areas stay under the ambient light
+        y = self._set_scroll_setup(y)
         c.tag_raise("orb")
         for b in self.btn.values():
             c.tag_raise(b["tag"])
@@ -2842,6 +3091,86 @@ class Widget:
         self._place_buttons()
         self._fill(self.btn["gear"]["g"], self._btn_color("gear"))
         self._resize(y)
+
+    def _set_scroll_setup(self, total: int) -> int:
+        """When Settings is taller than the screen allows, the body scrolls under a fixed header and a fixed,
+        rounded bottom. Returns the height to show."""
+        c, p, Wp = self.c, self.p, self.Wp
+        c.delete("setmask")
+        room = self._room()
+        self._set_max = max(0, total - room)
+        if not self._set_max:
+            self._set_off = 0
+            return total
+        top, bot = p(PAD + ORB + 8), room - p(R_PANEL)
+        self._set_band = (top, bot)
+        off, self._set_off = min(self._set_off, self._set_max), 0
+        # header: the card and its ambient light, cropped to the header band
+        c.create_rectangle(0, 0, Wp, top, fill=CARD, width=0, tags=("setmask", "bg"))
+        src = self.art.glow(Wp, p(240), "pan")
+        key = ("glowtop", Wp, top, str(src))
+        if key not in self.art._cache:
+            im = self.tk.PhotoImage(width=Wp, height=top)
+            im.tk.call(im, "copy", str(src), "-from", 0, 0, Wp, top, "-to", 0, 0)
+            self.art._cache[key] = im
+        c.create_image(0, 0, anchor="nw", image=self.art._cache[key], tags=("setmask", "bg"))
+        c.create_line(p(PAD), top - 1, Wp - p(PAD), top - 1, fill=HAIR, tags=("setmask", "setedge"))
+        c.create_rectangle(0, bot, Wp, room, fill=CARD, width=0, tags=("setmask", "bg"))
+        c.create_line(p(PAD), bot, Wp - p(PAD), bot, fill=HAIR, tags=("setmask", "setedge"))
+        self._set_bar = c.create_line(0, 0, 0, 0, fill=MUTED, width=max(2, p(3)), capstyle="round",
+                                      tags=("setmask",), state="hidden")
+        c.tag_raise("setmask")
+        for it in (self.pan_name, self.pan_meta, self.rim_l, self.rim_r, self.rim_b, self.rim_top):
+            c.tag_raise(it)
+        c.tag_raise("ring")
+        self._set_scroll(off)
+        return room
+
+    def _set_scroll(self, to: float):
+        """Move the settings body to offset `to` (clamped) and redraw the thin scrollbar."""
+        to = max(0, min(self._set_max, int(to)))
+        d = to - self._set_off
+        if d:
+            self.c.move("set", 0, -d)
+            self._set_off = to
+        if self._set_max:
+            p, (top, bot) = self.p, self._set_band
+            span = bot - top - p(16)
+            seen = span * span / (span + self._set_max)
+            y0 = top + p(8) + (span - seen) * to / self._set_max
+            x = self.Wp - p(7)
+            self.c.coords(self._set_bar, x, y0, x, y0 + seen)
+            self.c.itemconfigure(self._set_bar, state="disabled" if self._set_bar_on else "hidden")
+
+    def _on_wheel(self, e):
+        if self.view != "settings" or not getattr(self, "_set_max", 0):
+            return
+        self._set_bar_on = True
+        step = -e.delta / 120 * self.p(48)
+        start, end = self._set_off, max(0, min(self._set_max, self._set_off + step + self._set_goal_left()))
+        self._set_goal = end
+        self._anim("setscroll", 0.18, lambda t: self._set_scroll(start + (end - start) * t), ease=ease_out,
+                   done=self._bar_later)
+
+    def _set_goal_left(self):
+        # wheel ticks during a scroll add up instead of restarting from where the motion is now
+        if "setscroll" in self._anims and getattr(self, "_set_goal", None) is not None:
+            return self._set_goal - self._set_off
+        return 0
+
+    def _bar_later(self):
+        if self._bar_job:
+            self.root.after_cancel(self._bar_job)
+
+        def off():
+            self._bar_job = None
+            self._set_bar_on = False
+            if getattr(self, "_set_bar", None):
+                try:
+                    self.c.itemconfigure(self._set_bar, state="hidden")
+                except self.tk.TclError:
+                    pass
+        self._bar_job = self.root.after(900, off)
 
     @staticmethod
     def _short(key, v):
@@ -2867,11 +3196,11 @@ class Widget:
         xs = sl["xs"]
         ix = min(range(len(xs)), key=lambda i: abs(xs[i] - x))
         kx = min(max(x, xs[0]), xs[-1])
-        c.coords(sl["knob"], kx, sl["ty"])
-        c.coords(sl["fill"], sl["a"], sl["ty"], kx, sl["ty"])
+        c.coords(sl["knob"], kx, (sl["ty"] - self._set_off))
+        c.coords(sl["fill"], sl["a"], (sl["ty"] - self._set_off), kx, (sl["ty"] - self._set_off))
         c.itemconfigure(sl["vt"], text=sl["names"][ix])
         for i, d in enumerate(sl["dots"]):
-            c.itemconfigure(d, image=self.art.circle(7, fill=Art._rgba(AMBER if xs[i] <= kx + 1 else HAIR)))
+            c.itemconfigure(d, image=self.art.circle(7, fill=Art._rgba(ACC[0] if xs[i] <= kx + 1 else HAIR)))
         sl["ix"] = ix
 
     def _slide_end(self, key):
@@ -2883,8 +3212,8 @@ class Widget:
 
         def snap(t):
             x = x0 + (xs[ix] - x0) * t
-            self.c.coords(sl["knob"], x, sl["ty"])
-            self.c.coords(sl["fill"], sl["a"], sl["ty"], x, sl["ty"])
+            self.c.coords(sl["knob"], x, (sl["ty"] - self._set_off))
+            self.c.coords(sl["fill"], sl["a"], (sl["ty"] - self._set_off), x, (sl["ty"] - self._set_off))
         self._anim("snap", 0.12, snap, done=lambda: (
             self._set(key, sl["stops"][ix]) if sl["stops"][ix] != self.cfg.get(key) else None))
 

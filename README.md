@@ -469,8 +469,10 @@ project for an hour, minimize to an orb, clear the queue, quit. Esc or X hides i
 
 **Minimize** (the dash button in the panel header, the dash that appears when you hover the capsule, or
 right-click > "Minimize to an orb") shrinks the player
-to a 40 px ember orb where the player was. The orb pulses while a reply speaks and shows the number of calls
-waiting on you. Click it to restore it; drag it to move it. The minimized state survives a restart. A new call
+to a 40 px glossy ember orb that slides to the nearest side of the screen. It pulses while a reply speaks,
+shows calls waiting as a small pill, and grows a little on hover (tooltip: "Ember Voice Player · 2 calls").
+Click it and the player comes back exactly where it was; drag it and it settles on the nearest edge again.
+The minimized state survives a restart. A new call
 restores the player only when "Open the panel when a call arrives" is on.
 
 **Bring it back**: the Start menu shortcut **Ember Voice Player** (`show_player.pyw`, icon in
@@ -485,13 +487,14 @@ The gear button opens Settings. Changes apply at once and are saved to
 
 | Setting | Choices | Default |
 | --- | --- | --- |
-| Theme (card, text and accent colour of the answer buttons) | Ember, Graphite (neutral greys, silver buttons), Midnight (deep navy, blue buttons), Daylight (warm cream, dark text) | Ember |
+| Theme (colours and type) | Ember (Outfit + DM Sans), Graphite (greys, silver buttons; Segoe UI Variable + Cascadia Mono), Midnight (navy, blue; Bahnschrift + Segoe UI), Daylight (warm cream; Sitka serif headings + DM Sans) | Ember |
 | Text size (scales the whole player) | S, M, L, XL, XXL | M |
 | Player width (independent of text size) | Narrow, Default, Wide, Wider (0.85x to 1.4x) | Default |
 | Opacity | 70, 80, 90, 100% | 100% |
 | Pulse color (rim and glow) | Promethean Amber (MadeFire orange), Cooled Ember, Ember Light, Rose, Violet, Blue, Teal, White | Promethean Amber |
 | Glow size (how far the glow reaches outside the rim) | Rim only, Small, Medium, Large, Largest | Medium |
 | Pulse with the voice (rim and orb follow the voice's loudness; off: slow breath) | on/off | on |
+| Reduce motion (panels change at once, fades stay; also on when Windows "Animation effects" is off) | on/off | off |
 | Voice (click to hear it) | Heart, Bella, Nicole, Sarah, Michael, Adam, Emma (UK), George (UK) | Heart |
 | Speaking speed | 0.9x to 1.4x | 1x |
 | Say which project first | on/off | on |
@@ -507,7 +510,13 @@ The gear button opens Settings. Changes apply at once and are saved to
 ignored). Changing the pulse color, glow size or pulse toggle plays a short preview pulse. To add a setting, add it to `SETTINGS_SCHEMA` in `voiced.py` and a control in
 `Widget._settings_panel` in `player.py`.
 
+Settings taller than the screen scroll (mouse wheel) under a fixed header, and the player never grows past
+the screen's work area. Motion is short and eased out (about 150 to 250 ms, exits quicker than entries): the
+panel settles out of the capsule, Settings comes in from the gear side, the next question slides in a few
+pixels with its options staggered, and toasts rise. Nothing animates after a key press.
+
 It is light: one canvas, no widget per row, and animations run only while something moves (about 1% of a
 core idle, 5% while speaking).
 
-Tests: `venv\Scripts\python.exe -m unittest test_voiced`
+Tests: `venv\Scripts\python.exe -m unittest test_voiced test_player_themes` (the second opens the real player
+for every theme: panel, settings and its scroll, capsule hover, minimize and restore)

@@ -74,6 +74,7 @@ SETTINGS_SCHEMA = {
     "glow_size": ([0, 6, 12, 18, 24], 12),
     "player_width": ([0.85, 1.0, 1.2, 1.4], 1.0),  # of the base width, independent of the text size
     "theme": (["ember", "graphite", "midnight", "daylight"], "ember"),
+    "reduce_motion": (bool, False),  # also on when Windows "Animation effects" is off
     "minimized": (bool, False),  # the player is a small orb; kept across restarts
 }
 
