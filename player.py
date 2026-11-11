@@ -24,7 +24,7 @@ import threading
 import time
 from pathlib import Path
 
-from voiced import SKIPPED, combined_answer, decisions_of
+from voiced import SKIPPED, combined_answer, decisions_of, thread_title
 
 _HERE = Path(__file__).resolve().parent
 
@@ -758,6 +758,9 @@ class MiniOrb:
         if on:
             calls = (self.state or (0, 0))[1]
             text = "Ember Voice Player" + (f" · {calls} call{'s' if calls != 1 else ''}" if calls else "")
+            first = (self.w._calls or [None])[0] if calls else None
+            if first:  # which thread is first in line
+                text += "\n" + self.w._fit(self.w._where(first, "Next: {}"), self.w.F["meta"], self.w.p(300))
             self._tip_job = self.w.root.after(450, lambda: (setattr(self, "_tip_job", None), self.w._tip_show(text)))
 
     def _press(self, e):
@@ -1092,11 +1095,38 @@ class Widget:
         return (f"{n} call{s} waiting on you", f"{n} call{s} waiting", f"{n} call{s}")
 
     @staticmethod
-    def _last_lines(last):
+    def _thread(item) -> str:
+        """The thread name for a row (re-read at display time, cached), unless it just repeats the project."""
+        if not item:
+            return ""
+        try:
+            t = thread_title(item.get("session_id") or "", item.get("cwd") or "")
+        except Exception:
+            t = ""
+        t = t or item.get("thread") or ""
+        proj = (item.get("project") or "").lower()
+        return "" if not t or t.lower() == proj or t.lower() == proj.rsplit(".", 1)[0] else t
+
+    def _where(self, item, fmt="{}") -> tuple:
+        """"project · thread" phrasings, longest first: the thread is cut at a word (with an ellipsis) before
+        the project is touched, and the last phrasing is the project alone. For _fit."""
+        proj = (item or {}).get("project") or "?"
+        thread = self._thread(item)
+        if not thread:
+            return (fmt.format(proj),)
+        words, opts = thread.split(), []
+        for n in range(len(words), 0, -1):
+            t = " ".join(words[:n]) + ("" if n == len(words) else "…")
+            opts.append(fmt.format(f"{proj} · {t}"))
+        return tuple(opts) + (fmt.format(proj),)
+
+    def _last_lines(self, last):
         if not last:
             return ("Waiting for the next reply", "Waiting")
-        proj, t = last[0].get("project"), when(last[0]["ts"])
-        return (f"Last: {proj} · {t}", f"{proj} · {t}", f"Last: {t}")
+        t = when(last[0]["ts"])
+        full, bare = self._where(last[0], "Last: {} · " + t), self._where(last[0], "{} · " + t)
+        # thread phrasings with "Last:", then without it, then the project alone
+        return full[:-1] + bare[:-1] + full[-1:] + bare[-1:] + (f"Last: {t}",)
 
     def _reduced(self) -> bool:
         if self.cfg.get("reduce_motion"):
@@ -2667,7 +2697,7 @@ class Widget:
 
         # capsule text
         if show:
-            name = show.get("project") or "?"
+            name = self._where(show)
             line = show.get("text", "") if show.get("ready", True) else "Summarizing the reply…"
             if st["paused"] and cur:
                 line = "Paused · " + line
@@ -2676,7 +2706,7 @@ class Widget:
             name = self._calls_names(n)
             decs = decisions_of(self._calls[0])
             many = f" · {len(decs)} questions" if len(decs) > 1 else ""
-            line = f"{self._calls[0].get('project')}{many}: {decs[0]['question']}"
+            line = self._where(self._calls[0], "{}" + f"{many}: {decs[0]['question']}")
         else:
             last = self.vq.history.recent(1)
             name = "All caught up"
@@ -2724,7 +2754,7 @@ class Widget:
                self._draft_sig(call), self.lib, lib_sig, self.mode)
         # header (cheap, every tick)
         if show:
-            name = show.get("project") or "?"
+            name = self._where(show)
             sid = (show.get("session_id") or "")[:8]
             host = (show.get("host") or {}).get("kind")
             where = {"desktop": "Claude desktop", "vscode": "VS Code", "cursor": "Cursor",
@@ -2742,7 +2772,7 @@ class Widget:
         if self._text(self.pan_name, shown_name) or force:
             c.coords(self.pan_arrow, p(78) + self.F["title"].measure(shown_name) + p(6), p(31))
         if not toast:
-            self._text(self.pan_meta, self._fit(meta, self.F["meta"], Wp - p(78) - p(169)))
+            self._text(self.pan_meta, self._fit(meta, self.F["meta"], Wp - p(78) - p(PAD)))  # under the buttons
             self._fill(self.pan_meta, MUTED)
         self._text(self.next_t, self._ellipsize(f"Next: {q[0].get('project')}" if q else "Nothing after this",
                                                 self.F["meta"], p(150)))
@@ -2789,9 +2819,12 @@ class Widget:
             c.coords(self.call_rule, p(PAD), y, p(PAD) + p(20), y)
             c.coords(self.call_eyebrow, p(PAD) + p(28), y)
             ew = self.F["mono"].measure("YOUR CALL")
-            frm = self._ellipsize(f"· {call.get('project') or '?'}", self.F["mono"], p(150))
+            x0 = p(PAD) + p(28) + ew + p(8)
+            room = (Wp - p(PAD) - x0 - self.F["mono"].measure("Dismiss") - p(20)
+                    - (self.F["mono"].measure("‹ 10/10 ›") + p(18) if len(self._calls) > 1 else 0))
+            frm = self._fit(self._where(call, "· {}"), self.F["mono"], max(p(60), room))
             self._text(self.call_from, frm)
-            c.coords(self.call_from, p(PAD) + p(28) + ew + p(8), y)
+            c.coords(self.call_from, x0, y)
             right = Wp - p(PAD)
             c.coords(self.call_dismiss, right, y)
             right -= self.F["mono"].measure("Dismiss") + p(20)
@@ -3392,13 +3425,14 @@ class Widget:
             l.create_text(p(8), y + p(16), anchor="w", text=when(it["ts"]), font=self.F["mono_s"], fill=FAINT,
                           tags=(tag,))
         nx = p(70) if kind == "history" else p(8)
-        name = it.get("project") or "?"
         st = it.get("status", "")
         label = STATUS_TAGS.get(st, "" if st in ("spoken", "queued", "") else st.split(":")[0][:14])
         if it.get("answer"):
             label = "answered"
         elif it.get("decision") and not it.get("dismissed") and kind == "history":
             label = "your call"
+        room = w - nx - p(32) - (self.F["mono_s"].measure(label.upper()) + p(8) if label else 0)
+        name = self._fit(self._where(it), self.F["row"], max(p(60), room))
         l.create_text(nx, y + p(16), anchor="w", text=name, font=self.F["row"], fill=FG, tags=(tag,))
         if label:
             lx = nx + self.F["row"].measure(name) + p(8)

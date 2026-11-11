@@ -380,6 +380,36 @@ class WaitingScanTests(unittest.TestCase):
         self.assertGreater(rows[0]["ts"], self.h.get("hook1")["ts"])
 
 
+class ThreadNameTests(unittest.TestCase):
+    def test_desktop_title_rename_generic_and_cli_summary(self):
+        root = Path(tempfile.mkdtemp())
+        d = root / "a" / "b"
+        d.mkdir(parents=True)
+        f = d / "local_1.json"
+        sid = "11111111-2222-3333-4444-555555555555"
+        f.write_text(json.dumps({"cliSessionId": sid, "title": "Design System"}), encoding="utf-8")
+        self.assertEqual(voiced.thread_title(sid, root=root), "Design System")
+        f.write_text(json.dumps({"cliSessionId": sid, "title": "Design System v2"}), encoding="utf-8")
+        self.assertEqual(voiced.thread_title(sid, root=root), "Design System v2")    # a rename shows
+        f.write_text(json.dumps({"cliSessionId": sid, "title": "Local session (from a project)"}), encoding="utf-8")
+        self.assertEqual(voiced.thread_title(sid, root=root), "")                    # generic names: none
+        tdir = Path(tempfile.mkdtemp())
+        (tdir / "cli9.jsonl").write_text(json.dumps({"type": "summary", "summary": "Fix the \"login\" bug"}) + chr(10),
+                                         encoding="utf-8")
+        old = voiced.transcript_path
+        voiced.transcript_path = lambda cwd, s, *a: tdir / f"{s}.jsonl"
+        try:
+            self.assertEqual(voiced.thread_title("cli9", root=root), 'Fix the "login" bug')
+        finally:
+            voiced.transcript_path = old
+
+    def test_spoken_prefix_names_the_thread(self):
+        item = {"project": "paperclip.ai", "thread": "Design System", "text": "Done."}
+        self.assertEqual(voiced.spoken_text(item), "From Design System, in paperclip. Done.")
+        self.assertEqual(voiced.spoken_text({**item, "thread": "Paperclip AI"}), "From paperclip ai. Done.")
+        self.assertEqual(voiced.spoken_text(item, say_source=False), "Done.")
+
+
 class SingleDaemonTests(unittest.TestCase):
     def test_second_daemon_cannot_bind(self):
         srv = voiced.make_server(None, 0)

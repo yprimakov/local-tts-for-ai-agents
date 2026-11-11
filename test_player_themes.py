@@ -179,6 +179,30 @@ class ThemeTests(unittest.TestCase):
             self.st.update(player_width=1.0, text_size=1.0)
             w._rebuild()
 
+    def test_thread_name_shown_and_cut_before_the_project(self):
+        w = self.w
+        old = player.thread_title
+        player.thread_title = lambda sid, cwd="": "Design System for the client portal"
+        try:
+            item = {"project": "paperclip.ai", "session_id": "s"}
+            opts = w._where(item)
+            self.assertEqual(opts[0], "paperclip.ai · Design System for the client portal")
+            self.assertEqual(opts[-1], "paperclip.ai")
+            self.assertTrue(all(o.startswith("paperclip.ai") for o in opts))
+            self.assertIn("paperclip.ai · Design System…", opts)               # cut at a word, ellipsis
+            f = w.F["mono"]
+            self.assertEqual(w._fit(opts, f, f.measure("paperclip.ai · Design System…")), "paperclip.ai · Design System…")
+            self.assertEqual(w._fit(opts, f, f.measure("paperclip.ai") + 2), "paperclip.ai")
+            w._set_mode("panel")
+            w._layout_key = None
+            w._tick_once(force=True)
+            self.pump(0.2)
+            self.assertIn("· demo · Design", w.c.itemcget(w.call_from, "text"))
+            player.thread_title = lambda sid, cwd="": "demo"                  # same as the project: hidden
+            self.assertEqual(w._where({"project": "demo", "session_id": "s"}), ("demo",))
+        finally:
+            player.thread_title = old
+
     def test_bundled_fonts_present_and_fallback(self):
         fonts = Path(player.__file__).with_name("fonts")
         for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",

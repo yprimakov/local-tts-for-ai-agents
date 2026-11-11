@@ -197,6 +197,10 @@ def spoken_text(item: dict, say_source: bool = True) -> str:
     if item.get("no_source"):
         lead = ""
     elif say_source:
+        thread = re.sub(r"[-_]+", " ", item.get("thread") or "").strip()
+        if thread and thread.lower() != who.lower():
+            short = re.sub(r"\s+(ai|com|io|app|dev|net|org)$", "", who, flags=re.I)
+            who = f"{thread}, in {short}"
         lead = f"From {who}, {n} replies. The latest:" if n > 1 else f"From {who}."
     else:
         lead = f"{n} replies. The latest:" if n > 1 else ""
@@ -545,6 +549,10 @@ class VoiceQueue:
         src = source_of(cwd, entrypoint)
         src["headless"] = src["headless"] or bool(headless)
         message = (message or text).strip()
+        try:
+            src["thread"] = thread_title(session_id, cwd)
+        except Exception as e:  # cosmetic
+            log(f"thread title: {e!r}")
         item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": text.strip(), "cwd": cwd,
                 "session_id": session_id, "entrypoint": entrypoint, **src, "status": "queued",
                 "message": message[:8000], "host": host or {}, **({"scan_key": scan_key} if scan_key else {})}
@@ -1302,6 +1310,60 @@ def waiting_cli_sessions(root: Path | None = None, hours: float = 72, skip: set 
                     "text": ("Waiting for your answer: " + decs[0]["question"]) if decs else text[-4000:],
                     "summarize": not decs})
     return out
+
+
+_GENERIC_TITLE = re.compile(r"^(local session\b|new (session|chat|conversation)\b|untitled\b|claude code\b)", re.I)
+_THREADS: dict[str, tuple[float, str]] = {}   # session id -> (looked up at, title)
+_DESKTOP_MAP: list = [0.0, {}]                 # [built at, {cli session id: session file}]
+
+
+def _desktop_files(root: Path | None = None, ttl: float = 30) -> dict:
+    if root is None and time.time() - _DESKTOP_MAP[0] < ttl:
+        return _DESKTOP_MAP[1]
+    base = root or (Path(os.environ.get("APPDATA", "")) / "Claude" / "claude-code-sessions")
+    out = {}
+    try:
+        for f in base.glob("*/*/local_*.json"):
+            with f.open("rb") as fh:
+                m = _CLI_ID.search(fh.read(600))
+            if m:
+                out[m.group(1).decode()] = f
+    except OSError:
+        pass
+    if root is None:
+        _DESKTOP_MAP[:] = [time.time(), out]
+    return out
+
+
+def thread_title(session_id: str, cwd: str = "", ttl: float = 30, root: Path | None = None) -> str:
+    """The thread's own name: the Claude app's session title (the sidebar name, read fresh so renames show),
+    else a terminal transcript's summary line. Generic names ("Local session ...") count as none."""
+    if not session_id:
+        return ""
+    hit = _THREADS.get(session_id)
+    if hit and time.time() - hit[0] < ttl and root is None:
+        return hit[1]
+    title = ""
+    f = _desktop_files(root).get(session_id)
+    if f:
+        try:
+            title = str(json.loads(f.read_text(encoding="utf-8")).get("title") or "")
+        except (OSError, ValueError):
+            title = ""
+    else:
+        p = transcript_path(cwd, session_id)
+        try:
+            with p.open("rb") as fh:
+                head = fh.read(65536).decode("utf-8", errors="replace")
+            m = re.search(r'"type"\s*:\s*"summary"\s*,\s*"summary"\s*:\s*"((?:[^"\\]|\\.)*)"', head)
+            title = json.loads(f'"{m.group(1)}"') if m else ""
+        except (OSError, AttributeError, ValueError):
+            title = ""
+    title = " ".join(title.split())[:80]
+    if _GENERIC_TITLE.match(title):
+        title = ""
+    _THREADS[session_id] = (time.time(), title)
+    return title
 
 
 def desktop_title(app_id: str) -> str:
