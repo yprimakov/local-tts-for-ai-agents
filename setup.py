@@ -212,12 +212,17 @@ def patch_settings():
     for section in stop:
         section["hooks"] = [
             h for h in section.get("hooks", [])
-            if "tts_hook" not in h.get("command", "").replace("\\", "/")
+            if "tts_hook" not in h.get("command", "") and "kokoro_hook" not in h.get("command", "")
         ]
     hooks["Stop"] = [s for s in stop if s.get("hooks")]
 
     # Add the fresh entry
     hooks["Stop"].append({"hooks": [new_hook]})
+
+    # Permission prompts become "Approve in the app" calls in the player (same launcher; it reads the event)
+    note = [n for n in hooks.get("Notification", []) if not any(
+        "kokoro_hook" in h.get("command", "") or "tts_hook" in h.get("command", "") for h in n.get("hooks", []))]
+    hooks["Notification"] = note + [{"matcher": "permission_prompt", "hooks": [dict(new_hook)]}]
 
     CLAUDE_SETTINGS.write_text(
         json.dumps(settings, indent=2, ensure_ascii=False),

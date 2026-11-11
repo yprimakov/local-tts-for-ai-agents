@@ -2099,6 +2099,9 @@ class Widget:
 
     def _reply(self, call, text):
         """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
+        if call.get("kind") == "approve":  # approving happens where the session runs: open it
+            self._open(call)
+            return
         decs, d = self._draft(call)
         if len(decs) <= 1:
             self._answer(call, text or SKIPPED)

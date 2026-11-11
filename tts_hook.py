@@ -311,6 +311,14 @@ def main():
         _log(f"JSON parse error: {e}")
         return
 
+    if data.get("hook_event_name") == "Notification":
+        # a session paused on a permission prompt: a silent "Approve in the app" call (no speech, no autostart)
+        if data.get("notification_type") == "permission_prompt" or "permission" in str(data.get("message", "")).lower():
+            _post("/waiting", {"session_id": data.get("session_id") or "", "cwd": data.get("cwd") or os.getcwd(),
+                               "message": data.get("message") or "", "host": host_info(),
+                               "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT", "")})
+        return
+
     if data.get("stop_hook_active"):
         return  # prevent infinite loops
 

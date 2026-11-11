@@ -438,6 +438,13 @@ The Stop hook no longer plays audio itself. It posts each reply to one local dae
   or for a turn the app marks as needing you. One call per session, its newest question, never twice for the same
   turn, and none when the hook's call is already open. Archived, pytest and temp sessions are skipped. The
   summarizer's own runs keep no transcripts (`--no-session-persistence`)
+- also finds plain terminal sessions (`~/.claude/projects` transcripts, interactive `claude` only): an open
+  AskUserQuestion, or a final reply the hook never reported that reads like a question (summarized silently).
+  Their Open action copies the resume command
+- turns permission prompts into "Approve in the app" calls (Notification hook, matcher `permission_prompt`,
+  registered by `setup.py`). The call's one button opens the session; approving happens there
+- still summarizes replies from muted projects, muted mode and Do Not Disturb, so their questions become silent calls
+- closes a found call once its session writes anything newer (answered there, or the agent carried on)
 
 ### The player (player.py)
 

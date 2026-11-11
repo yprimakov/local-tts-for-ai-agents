@@ -269,8 +269,65 @@ class WaitingScanTests(unittest.TestCase):
         (self.tdir / f"{sid}.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in rows), encoding="utf-8")
 
     def scan(self):
-        self.vq.watch_waiting(root=self.root, once=True)
+        self.vq.watch_waiting(root=self.root, once=True, cli_root=False)
         return [r for r in self.h.recent(50) if r.get("scan_key")]
+
+    def cli(self, sid, text, entry="cli", cwd=None, ask=False, ago=600):
+        import datetime as dt
+        d = self.cli_root / "proj"
+        d.mkdir(parents=True, exist_ok=True)
+        iso = dt.datetime.fromtimestamp(time.time() - ago, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        content = ([{"type": "tool_use", "id": "tu9", "name": "AskUserQuestion", "input": {"questions": [
+            {"question": "Ship it?", "options": [{"label": "Yes"}, {"label": "No"}]}]}}] if ask
+                   else [{"type": "text", "text": text}])
+        rows = [{"type": "user", "entrypoint": entry, "cwd": str(cwd or self.repo), "timestamp": iso,
+                 "message": {"content": "go"}},
+                {"type": "assistant", "uuid": f"{sid}-a", "entrypoint": entry, "cwd": str(cwd or self.repo),
+                 "timestamp": iso, "message": {"content": content}}]
+        f = d / f"{sid}.jsonl"
+        f.write_text("".join(json.dumps(r) + chr(10) for r in rows), encoding="utf-8")
+        os.utime(f, (time.time() - ago, time.time() - ago))
+        return f
+
+    def test_terminal_sessions(self):
+        self.cli_root = Path(tempfile.mkdtemp())
+        self.cli("c1", "", ask=True)                                  # open question: a call with its options
+        self.cli("c2", "Plan A or plan B, which one should I build?")  # a question the hook never reported
+        self.cli("c3", "All done, tests pass.")                         # nothing to ask
+        self.cli("c4", "Should I push?", entry="sdk-cli")               # headless
+        self.cli("c5", "Should I push?", ago=5)                         # still being written
+        said = []
+        self.vq.say = lambda *a, **k: said.append((a, k))
+        self.vq.watch_waiting(root=self.root, once=True, cli_root=self.cli_root)
+        rows = {r["session_id"]: r for r in self.h.recent(50) if r.get("scan_key")}
+        self.assertEqual(set(rows), {"c1"})
+        self.assertEqual(rows["c1"]["decision"]["options"], ["Yes", "No"])
+        self.assertEqual([a[2] for a, k in said], ["c2"])               # summarized silently, then a call
+        self.assertEqual(said[0][1]["silent"], "found waiting")
+
+    def test_permission_prompt_call_and_close_on_move_on(self):
+        it = self.vq.add_waiting("p1", str(self.repo), "Claude needs your permission to use Bash")
+        self.assertEqual(it["decision"]["options"], ["Open"])
+        self.assertEqual(it["kind"], "approve")
+        it2 = self.vq.add_waiting("p1", str(self.repo), "Claude needs your permission to use Edit")
+        self.assertTrue(self.h.get(it["id"]).get("dismissed"))       # one call per session: the newest
+        import datetime as dt
+        iso = dt.datetime.fromtimestamp(time.time() + 30, dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        (self.tdir / "p1.jsonl").write_text(json.dumps({"type": "user", "timestamp": iso, "message": {
+            "content": [{"type": "tool_result", "tool_use_id": "x"}]}}) + chr(10), encoding="utf-8")
+        self.scan()
+        self.assertEqual(self.h.get(it2["id"])["answered_in"], "thread")
+
+    def test_muted_reply_still_becomes_a_silent_call(self):
+        self.vq._summarizer = lambda item: {"speak": True, "summary": "Pick one.",
+                                            "decision": {"question": "A or B?", "options": ["A", "B"]}}
+        self.vq.settings.update(summaries=True)
+        self.vq.set_muted(True)
+        threading.Thread(target=self.vq.summarize_loop, daemon=True).start()
+        item = self.vq.say("A or B?", str(self.repo), "m1")
+        self.assertTrue(wait(lambda: (self.h.get(item["id"]) or {}).get("decision")))
+        self.assertEqual(self.h.get(item["id"])["status"], "not spoken: muted")
+        self.assertNotIn(item, list(self.vq.queue))
 
     def test_open_ask_and_blocked_summary_become_calls_once(self):
         self.ask("s1")

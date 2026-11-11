@@ -532,14 +532,17 @@ class VoiceQueue:
         return self._summarizer if self.settings.get("summaries") else None
 
     # -- intake
+    QUIET_CALLS = ("muted", "project muted", "do not disturb", "found waiting")  # summarized, not spoken
+
     def say(self, text: str, cwd: str = "", session_id: str = "", entrypoint: str = "",
-            silent: str = "", message: str = "", headless: bool = False, host: dict | None = None) -> dict:
+            silent: str = "", message: str = "", headless: bool = False, host: dict | None = None,
+            scan_key: str = "") -> dict:
         src = source_of(cwd, entrypoint)
         src["headless"] = src["headless"] or bool(headless)
         message = (message or text).strip()
         item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": text.strip(), "cwd": cwd,
                 "session_id": session_id, "entrypoint": entrypoint, **src, "status": "queued",
-                "message": message[:8000], "host": host or {}}
+                "message": message[:8000], "host": host or {}, **({"scan_key": scan_key} if scan_key else {})}
         try:
             item["visuals"] = find_visuals(message, cwd)
         except Exception as e:  # cosmetic
@@ -557,6 +560,11 @@ class VoiceQueue:
         if silent:
             item["status"] = f"not spoken: {silent}"
             self.history.add(item)
+            if silent in self.QUIET_CALLS and self.summarizer and not src["headless"]:
+                with self._cv:  # a muted thread can still need Yury: its question becomes a silent call
+                    item["ready"] = False
+                    self._todo.append(item)
+                    self._cv.notify_all()
             return item
         with self._cv:
             # a newer reply from the same thread replaces its older unspoken ones: the queue stays current,
@@ -618,7 +626,44 @@ class VoiceQueue:
                 log(f"watch answers: {e!r}")
             time.sleep(every)
 
-    def watch_waiting(self, every: float = 60.0, root: Path | None = None, once: bool = False) -> None:
+    def add_waiting(self, session_id: str, cwd: str, message: str, kind: str = "approve",
+                    entrypoint: str = "", host: dict | None = None) -> dict | None:
+        """A session paused on a permission prompt (Notification hook). It can only be approved where it runs,
+        so the call's one action opens the session. One call per session: a newer prompt replaces it."""
+        if not session_id:
+            return None
+        src = source_of(cwd, entrypoint)
+        if src["headless"] or src["project"] in ("pytest run", "temp folder"):
+            return None
+        for r in self.history.recent(200):
+            if (r.get("session_id") == session_id and r.get("kind") == "approve" and not r.get("answer")
+                    and not r.get("dismissed")):
+                self.history.update(r["id"], dismissed=True)
+        msg = (message or "Claude needs your permission").strip().rstrip(".")
+        dec = {"question": f"Approve in the app: {msg}"[:240], "options": ["Open"], "context": "", "recommended": 0}
+        item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": dec["question"], "cwd": cwd,
+                "session_id": session_id, "entrypoint": entrypoint, **src, "status": "not spoken: found waiting",
+                "message": dec["question"], "host": host or {}, "kind": "approve", "decisions": [dec], "decision": dec}
+        self.history.add(item)
+        log(f"call {item['id']} ({src['project']}) waits for a permission")
+        return item
+
+    def _close_moved_on(self, rows: list[dict], hours: float) -> None:
+        """A found call (open question, needed action, permission prompt) closes once its session writes
+        anything newer: the question was answered there, or the agent carried on."""
+        now = time.time()
+        for r in rows:
+            if (not (r.get("scan_key") or r.get("kind") == "approve") or r.get("answer") or r.get("dismissed")
+                    or now - r.get("ts", 0) > hours * 3600):
+                continue
+            newest = last_entry_ts(transcript_path(r.get("cwd") or "", r.get("session_id") or ""))
+            if newest > r.get("ts", 0) + 5:
+                self.history.update(r["id"], answer="Moved on in the session", answered_at=newest,
+                                    answered_in="thread")
+                log(f"call {r['id']} ({r.get('project')}) closed: the session moved on")
+
+    def watch_waiting(self, every: float = 60.0, root: Path | None = None, once: bool = False,
+                      cli_root=None) -> None:
         """Calls for sessions that wait on Yury although no Stop hook made one (an open AskUserQuestion, or a
         reply the summarizer found no question in). One call per session, its newest question only; skipped
         when the session already has an open call, and never twice for the same turn."""
@@ -632,9 +677,20 @@ class VoiceQueue:
                     if r.get("session_id"):
                         if r.get("ts", 0) >= last.get(r["session_id"], {}).get("ts", -1):
                             last[r["session_id"]] = r
-                for w in waiting_sessions(root, hours):
+                self._close_moved_on(rows, hours)
+                found = waiting_sessions(root, hours)
+                if cli_root is not False:
+                    found += waiting_cli_sessions(cli_root, hours, skip=desktop_cli_ids(root))
+                for w in found:
                     prev = last.get(w["session_id"]) or {}
                     if w["scan_key"] in keys:
+                        continue
+                    if w.get("summarize"):  # a terminal reply the hook never reported: the summarizer finds its questions
+                        if prev.get("ts", 0) >= w["at"] - 5:
+                            continue
+                        self.say(w["text"][-2000:], w["cwd"], w["session_id"], "cli", silent="found waiting",
+                                 message=w["text"], scan_key=w["scan_key"])
+                        keys.add(w["scan_key"])
                         continue
                     if (decisions_of(prev) and not prev.get("answer") and not prev.get("dismissed")
                             and prev.get("status") not in ("not spoken: headless run",)):
@@ -955,6 +1011,11 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                             message=str(d.get("message") or ""), headless=bool(d.get("headless")), host=host)
                 it = {k: x for k, x in it.items() if k != "message"}
                 return self._json(200, it)
+            if self.path == "/waiting":  # Notification hook: a session waits for a permission
+                host = d.get("host") if isinstance(d.get("host"), dict) else {}
+                it = vq.add_waiting(str(d.get("session_id") or ""), str(d.get("cwd") or ""),
+                                    str(d.get("message") or ""), entrypoint=str(d.get("entrypoint") or ""), host=host)
+                return self._json(200, it or {"ok": False})
             if self.path == "/show":  # the "Voice player" shortcut
                 vq.show_requested = True
                 return self._json(200, {"ok": True})
@@ -1143,6 +1204,95 @@ def waiting_sessions(root: Path | None = None, hours: float = 72, quiet_for: flo
             text = "Waiting on you: " + q
         out.append({"session_id": sid, "cwd": cwd, "title": str(d.get("title") or ""), "at": at,
                     "scan_key": f"{sid}:{key}", "decisions": decs, "text": text[:400]})
+    return out
+
+
+def last_entry_ts(path: Path | None, tail: int = 65536) -> float:
+    """Time of the newest user or assistant entry in a transcript (0 if unknown)."""
+    if not path:
+        return 0.0
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tail))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0.0
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("type") in ("user", "assistant") and not r.get("isSidechain") and r.get("timestamp"):
+            return _iso_ts(r["timestamp"])
+    return 0.0
+
+
+_ASKS = re.compile(r"\?\s*$|\bdecisions?\b|\brecommended\b|want me to|should i|shall i|which (one|option)", re.I)
+
+
+def desktop_cli_ids(root: Path | None = None) -> set[str]:
+    root = root or (Path(os.environ.get("APPDATA", "")) / "Claude" / "claude-code-sessions")
+    out = set()
+    try:
+        for f in root.glob("*/*/local_*.json"):
+            with f.open("rb") as fh:
+                m = _CLI_ID.search(fh.read(600))
+            if m:
+                out.add(m.group(1).decode())
+    except OSError:
+        pass
+    return out
+
+
+def waiting_cli_sessions(root: Path | None = None, hours: float = 72, skip: set | None = None,
+                         quiet_for: float = 60) -> list[dict]:
+    """Terminal (interactive `claude`) sessions whose newest turn waits on Yury: an open AskUserQuestion, or
+    a final reply that reads like a question. Headless, pytest, temp and the summarizer's own runs are skipped."""
+    root = root or (Path.home() / ".claude" / "projects")
+    now, out, skip = time.time(), [], skip or set()
+    own = str(data_dir()).replace("/", "\\").lower()
+    try:
+        files = [f for f in root.glob("*/*.jsonl") if f.stem not in skip]
+    except OSError:
+        return out
+    for f in files:
+        try:
+            mt = f.stat().st_mtime
+            if now - mt > hours * 3600 or now - mt < quiet_for:
+                continue
+            with f.open("rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 262144))
+                lines = fh.read().decode("utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        rows = []
+        for line in lines[-80:]:
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+        ent = next((r.get("entrypoint") for r in reversed(rows) if r.get("entrypoint")), "")
+        cwd = next((r.get("cwd") for r in reversed(rows) if r.get("cwd")), "") or ""
+        if ent != "cli" or not cwd or cwd.replace("/", "\\").lower().startswith(own):
+            continue
+        if source_of(cwd)["project"] in ("pytest run", "temp folder"):
+            continue
+        msgs = [r for r in rows if r.get("type") in ("user", "assistant") and not r.get("isSidechain")]
+        if not msgs or msgs[-1]["type"] != "assistant":
+            continue
+        last = msgs[-1]
+        key, decs = pending_question(f)
+        content = (last.get("message") or {}).get("content") or []
+        text = " ".join(c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text").strip()
+        if not decs and (any(isinstance(c, dict) and c.get("type") == "tool_use" for c in content)
+                         or not _ASKS.search(text[-600:])):
+            continue  # a tool is running (or waiting for approval: the Notification hook reports that), or done
+        out.append({"session_id": f.stem, "cwd": cwd, "at": _iso_ts(last.get("timestamp") or "") or mt,
+                    "scan_key": f"{f.stem}:{key or last.get('uuid') or ''}", "decisions": decs,
+                    "text": ("Waiting for your answer: " + decs[0]["question"]) if decs else text[-4000:],
+                    "summarize": not decs})
     return out
 
 
