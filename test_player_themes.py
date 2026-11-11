@@ -128,6 +128,28 @@ class ThemeTests(unittest.TestCase):
         w.c.dtag(item, "current")
         w.c.configure(cursor="")
 
+    def test_double_click_background_toggles(self):
+        w = self.w
+        w._set_mode("cap")
+        self.pump(0.1)
+        ev = SimpleNamespace(x_root=100, y_root=100, x=5, y=5)
+        w.c.configure(cursor="")
+        w._drag_start(ev)
+        w._double(ev)
+        self.assertEqual(w.mode, "panel")
+        w._drag_start(ev)
+        w._drag(SimpleNamespace(x_root=140, y_root=100, x=45, y=5))  # the first click was a drag
+        w._double(ev)
+        self.assertEqual(w.mode, "panel")
+        w._drag_start(ev)
+        w.c.configure(cursor="hand2")                                # on a control
+        w._double(ev)
+        self.assertEqual(w.mode, "panel")
+        w.c.configure(cursor="")
+        w._double(ev)
+        self.assertEqual(w.mode, "cap")
+        self.assertIn("_double", w.c.tag_bind("bg", "<Double-Button-1>"))
+
     def test_bundled_fonts_present_and_fallback(self):
         fonts = Path(player.__file__).with_name("fonts")
         for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",

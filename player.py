@@ -104,7 +104,7 @@ GLYPHS = {  # Segoe Fluent Icons on Windows, plain symbols elsewhere
 }
 STATUS_TAGS = {"not spoken: headless run": "background", "not spoken: muted": "muted",
                "not spoken: project muted": "project muted", "not spoken: do not disturb": "do not disturb",
-               "not spoken: nothing to say": "no update", "not spoken: grouped": "grouped",
+               "not spoken: nothing to say": "no update", "not spoken: grouped": "grouped", "not spoken: found waiting": "waiting",
                "skipped": "skipped", "cleared": "cleared", "removed": "removed"}
 BACKGROUND = ("not spoken: headless run", "not spoken: grouped", "not spoken: nothing to say")
 
@@ -800,7 +800,7 @@ class MemSettings:
         self.version = 0
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
                    "say_source": True, "speak_background": False, "auto_open_calls": True,
-                   "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send",
+                   "hide_when_idle": False, "calls_hours": 72, "desktop_answers": "send",
                    "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12,
                    "player_width": 1.0, "theme": "ember", "minimized": False}
 
@@ -1209,7 +1209,8 @@ class Widget:
         self.rim_l = c.create_line(0, 0, 0, self.h, fill=HAIR, tags=("bg",))
         self.rim_r = c.create_line(Wp - 1, 0, Wp - 1, self.h, fill=HAIR, tags=("bg",))
         self.rim_b = c.create_line(0, self.h - 1, Wp, self.h - 1, fill=HAIR, tags=("bg",))
-        for ev, fn in (("<ButtonPress-1>", self._drag_start), ("<B1-Motion>", self._drag), ("<Button-3>", self._menu)):
+        for ev, fn in (("<ButtonPress-1>", self._drag_start), ("<B1-Motion>", self._drag), ("<Button-3>", self._menu),
+                       ("<Double-Button-1>", self._double)):
             c.tag_bind("bg", ev, fn)
             c.tag_bind("drag", ev, fn)
 
@@ -1452,8 +1453,19 @@ class Widget:
 
     def _drag_start(self, e):
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
+        self._press_at, self._dragged = (e.x_root, e.y_root), False
+
+    def _double(self, e):
+        """Double-click on empty background opens or collapses the player. Not on controls (hand cursor),
+        and not when the first click turned into a drag."""
+        if getattr(self, "_dragged", False) or self.c.cget("cursor") == "hand2" or self.view == "settings":
+            return
+        self._toggle_mode()
 
     def _drag(self, e):
+        px, py = getattr(self, "_press_at", (e.x_root, e.y_root))
+        if abs(e.x_root - px) + abs(e.y_root - py) > self.p(4):
+            self._dragged = True
         x, y = e.x_root - self._dx, e.y_root - self._dy
         self._xy = (x, y)
         self.root.geometry(f"+{x}+{y}")

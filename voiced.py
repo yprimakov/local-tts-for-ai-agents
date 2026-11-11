@@ -64,7 +64,7 @@ SETTINGS_SCHEMA = {
     "speak_background": (bool, False),
     "auto_open_calls": (bool, True),
     "hide_when_idle": (bool, False),
-    "calls_hours": ([6, 12, 24, 72], 24),
+    "calls_hours": ([6, 12, 24, 72], 72),
     # answers to a session open in the Claude app: type them into its thread and send, paste only, or the old
     # background `claude --resume -p` (invisible in the app's thread, which then goes out of date)
     "desktop_answers": (["send", "paste", "background"], "send"),
@@ -142,6 +142,26 @@ def log(msg: str) -> None:
 _TEMP_HINTS = ("\\temp\\", "/tmp/", "/var/folders/", "\\appdata\\local\\temp")
 
 
+_WORKTREE = re.compile(r"[\\/]\.claude[\\/]worktrees[\\/][^\\/]+", re.I)
+
+
+def main_repo(q: Path) -> Path:
+    """The main checkout for a git worktree (its .git is a file naming <main>/.git/worktrees/<name>)."""
+    try:
+        if (q / ".git").is_file():
+            line = (q / ".git").read_text(encoding="utf-8", errors="replace").strip()
+            if line.startswith("gitdir:"):
+                gd = Path(line[7:].strip())
+                if not gd.is_absolute():
+                    gd = (q / gd).resolve()
+                if gd.parent.name == "worktrees":
+                    return gd.parent.parent.parent
+    except OSError:
+        pass
+    m = _WORKTREE.search(str(q))
+    return Path(str(q)[:m.start()]) if m else q
+
+
 def source_of(cwd: str | None, entrypoint: str | None = None) -> dict:
     """Project label for a session's working folder: the git root's name, or a plain description."""
     cwd = (cwd or "").strip()
@@ -152,7 +172,7 @@ def source_of(cwd: str | None, entrypoint: str | None = None) -> dict:
         q = p
         while q and q != q.parent:
             if (q / ".git").exists():
-                name = q.name
+                name = main_repo(q).name   # a worktree is named after its main repository
                 break
             q = q.parent
     except OSError:
@@ -162,6 +182,8 @@ def source_of(cwd: str | None, entrypoint: str | None = None) -> dict:
     elif not name and any(h.replace("/", "\\") in low for h in _TEMP_HINTS):
         project, spoken = "temp folder", "a temporary folder"
     else:
+        if not name and p and _WORKTREE.search(cwd):
+            name = main_repo(p).name
         name = name or (p.name if p else "") or "unknown session"
         project, spoken = name, name
     headless = (entrypoint or "").lower().startswith("sdk")
@@ -394,7 +416,7 @@ class Summarizer:
         prompt = SUMMARY_PROMPT.format(project=item.get("project") or "unknown",
                                        message=(item.get("message") or item.get("text") or "")[:8000])
         cmd = [self.exe, "-p", "--model", self.model, "--output-format", "json", "--strict-mcp-config",
-               "--settings", json.dumps({"disableAllHooks": True}),
+               "--no-session-persistence", "--settings", json.dumps({"disableAllHooks": True}),
                "--disallowedTools", "Bash,PowerShell,Edit,Write,Read,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit"]
         try:
             p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, encoding="utf-8",
@@ -436,6 +458,9 @@ class History:
             if r.get("id"):
                 by_id.setdefault(r["id"], {}).update(r)
         self.items = sorted((r for r in by_id.values() if r.get("ts", 0) >= cutoff), key=lambda r: r["ts"])
+        for r in self.items:  # rows saved before worktrees were mapped to their main repository
+            if r.get("cwd") and _WORKTREE.search(r["cwd"]):
+                r["project"] = source_of(r["cwd"])["project"]
         self._rewrite()
 
     def _rewrite(self) -> None:
@@ -591,6 +616,42 @@ class VoiceQueue:
                         log(f"call {r['id']} ({r.get('project')}) answered in its thread")
             except Exception as e:  # never stop watching over one bad row
                 log(f"watch answers: {e!r}")
+            time.sleep(every)
+
+    def watch_waiting(self, every: float = 60.0, root: Path | None = None, once: bool = False) -> None:
+        """Calls for sessions that wait on Yury although no Stop hook made one (an open AskUserQuestion, or a
+        reply the summarizer found no question in). One call per session, its newest question only; skipped
+        when the session already has an open call, and never twice for the same turn."""
+        while not self._stop:
+            try:
+                hours = float(self.settings.get("calls_hours") or 72)
+                rows = self.history.recent(400)
+                keys = {r.get("scan_key") for r in rows if r.get("scan_key")}
+                last: dict[str, dict] = {}
+                for r in rows:
+                    if r.get("session_id"):
+                        if r.get("ts", 0) >= last.get(r["session_id"], {}).get("ts", -1):
+                            last[r["session_id"]] = r
+                for w in waiting_sessions(root, hours):
+                    prev = last.get(w["session_id"]) or {}
+                    if w["scan_key"] in keys:
+                        continue
+                    if (decisions_of(prev) and not prev.get("answer") and not prev.get("dismissed")
+                            and prev.get("status") not in ("not spoken: headless run",)):
+                        continue  # the hook's call for this turn is already open
+                    src = source_of(w["cwd"])
+                    item = {"id": uuid.uuid4().hex[:12], "ts": max(w["at"], prev.get("ts", 0) + 2),
+                            "text": w["text"], "cwd": w["cwd"], "session_id": w["session_id"],
+                            "entrypoint": "claude-desktop", **src, "status": "not spoken: found waiting",
+                            "message": w["text"], "host": {}, "scan_key": w["scan_key"],
+                            "decisions": w["decisions"], "decision": w["decisions"][0]}
+                    self.history.add(item)
+                    keys.add(w["scan_key"])
+                    log(f"call {item['id']} ({src['project']}) found waiting")
+            except Exception as e:  # never stop scanning over one bad file
+                log(f"watch waiting: {e!r}")
+            if once:
+                return
             time.sleep(every)
 
     def summarize_loop(self) -> None:
@@ -1003,6 +1064,88 @@ def desktop_session_id(cli_sid: str, root: Path | None = None) -> str:
     return ""
 
 
+def pending_question(path: Path | None, tail: int = 262144) -> tuple[str, list[dict]]:
+    """An AskUserQuestion the session shows right now (no answer yet): its tool_use id and the questions.
+
+    The Stop hook does not fire while that dialog is open, so without this the question never reaches the player."""
+    if not path:
+        return "", []
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - tail))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return "", []
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("type") not in ("user", "assistant") or r.get("isSidechain"):
+            continue
+        if r["type"] == "user":
+            return "", []  # an answer, a tool result or a new prompt came after it
+        content = (r.get("message") or {}).get("content") or []
+        ask = next((c for c in content if isinstance(c, dict) and c.get("type") == "tool_use"
+                    and c.get("name") == "AskUserQuestion"), None)
+        if not ask:
+            return "", []
+        decs = []
+        for q in ((ask.get("input") or {}).get("questions") or [])[:6]:
+            labels = [str(o.get("label") if isinstance(o, dict) else o).strip() for o in q.get("options") or []]
+            rec = next((i for i, lab in enumerate(labels) if "(recommended)" in lab.lower()), None)
+            opts = [re.sub(r"\s*\(recommended\)", "", lab, flags=re.I)[:80] for lab in labels if lab][:4]
+            if str(q.get("question") or "").strip():
+                decs.append({"question": str(q["question"]).strip()[:240], "options": opts if len(opts) > 1 else [],
+                             "context": "", "recommended": rec if len(opts) > 1 and rec is not None and rec < len(opts) else None})
+        return (ask.get("id") or r.get("uuid") or ""), decs
+    return "", []
+
+
+def waiting_sessions(root: Path | None = None, hours: float = 72, quiet_for: float = 60) -> list[dict]:
+    """Desktop Code sessions that wait on Yury now: an open AskUserQuestion, or the app's own turn summary says
+    he must act. One entry per session (its newest question), with a key that changes when the session moves on."""
+    root = root or (Path(os.environ.get("APPDATA", "")) / "Claude" / "claude-code-sessions")
+    now, out = time.time(), []
+    try:
+        files = list(root.glob("*/*/local_*.json"))
+    except OSError:
+        return out
+    own = str(data_dir()).replace("/", "\\").lower()
+    for f in files:
+        try:
+            if now - f.stat().st_mtime > hours * 3600:
+                continue
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        sid, cwd = str(d.get("cliSessionId") or ""), str(d.get("cwd") or "")
+        at = float(d.get("lastActivityAt") or 0) / 1000
+        if not sid or d.get("isArchived") or now - at > hours * 3600:
+            continue
+        src = source_of(cwd)
+        if src["project"] in ("pytest run", "temp folder") or cwd.replace("/", "\\").lower().startswith(own):
+            continue
+        key, decs = pending_question(transcript_path(cwd, sid))
+        text = ""
+        if decs:
+            text = "Waiting for your answer: " + decs[0]["question"]
+        else:
+            pts = d.get("postTurnSummary") or {}
+            need = str(pts.get("needs_action") or "").strip()
+            if not (need and pts.get("status_category") == "blocked" and now - at > quiet_for
+                    and pts.get("summarizes_uuid") == d.get("lastAssistantUuid")):
+                continue  # still working, or the summary is about an older turn
+            key = str(pts.get("summarizes_uuid") or "")
+            q = need[:1].upper() + need[1:]
+            decs = [{"question": q[:240], "options": [], "context": "", "recommended": None}]
+            text = "Waiting on you: " + q
+        out.append({"session_id": sid, "cwd": cwd, "title": str(d.get("title") or ""), "at": at,
+                    "scan_key": f"{sid}:{key}", "decisions": decs, "text": text[:400]})
+    return out
+
+
 def desktop_title(app_id: str) -> str:
     """The thread's title as the Claude app shows it in its header (read fresh: it can be renamed)."""
     f = _DESKTOP_FILES.get(app_id)
@@ -1181,6 +1324,7 @@ def main(argv=None) -> int:
     if summarizer:
         threading.Thread(target=vq.summarize_loop, daemon=True).start()
     threading.Thread(target=vq.watch_answers, daemon=True).start()
+    threading.Thread(target=vq.watch_waiting, daemon=True).start()
 
     def prune():
         while True:

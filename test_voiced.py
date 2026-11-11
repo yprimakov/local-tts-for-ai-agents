@@ -156,6 +156,28 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(voiced.source_of(r"C:\Users\y\AppData\Local\Temp\x")["project"], "temp folder")
 
 
+class WorktreeNameTests(unittest.TestCase):
+    def test_worktree_named_after_main_repo(self):
+        root = Path(tempfile.mkdtemp())
+        main = root / "real-estate"
+        wt = main / ".claude" / "worktrees" / "distracted-torvalds-b502be"
+        (main / ".git" / "worktrees" / "distracted-torvalds-b502be").mkdir(parents=True)
+        wt.mkdir(parents=True)
+        gitdir = main / ".git" / "worktrees" / "distracted-torvalds-b502be"
+        (wt / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        self.assertEqual(voiced.source_of(str(wt / "src"))["project"], "real-estate")
+        # the worktree folder is gone: the path alone still maps to the main repository
+        gone = r"C:\nowhere\shop-app\.claude\worktrees\happy-lamport-1a2b3c"
+        self.assertEqual(voiced.source_of(gone)["project"], "shop-app")
+
+    def test_old_history_rows_renamed(self):
+        path = Path(tempfile.mkdtemp()) / "h.jsonl"
+        row = {"id": "a", "ts": time.time(), "project": "distracted-torvalds-b502be",
+               "cwd": r"C:\nowhere\shop-app\.claude\worktrees\distracted-torvalds-b502be", "text": "x"}
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+        self.assertEqual(voiced.History(path).get("a")["project"], "shop-app")
+
+
 class ApiTests(unittest.TestCase):
     def test_local_api(self):
         h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
@@ -210,6 +232,82 @@ class WatchAnswersTests(unittest.TestCase):
         finally:
             voiced.transcript_path = old
             vq.stop()
+
+
+class WaitingScanTests(unittest.TestCase):
+    """Sessions that wait on Yury become calls even when no Stop hook made one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.tdir = Path(tempfile.mkdtemp())
+        self.h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
+        self.vq = voiced.VoiceQueue(self.h, fake_synth, FakePlayer)
+        self._tp = voiced.transcript_path
+        voiced.transcript_path = lambda cwd, sid, *a: (self.tdir / f"{sid}.jsonl") if (self.tdir / f"{sid}.jsonl").exists() else None
+        self.repo = Path(tempfile.mkdtemp()) / "shop-app"
+        (self.repo / ".git").mkdir(parents=True)
+
+    def tearDown(self):
+        voiced.transcript_path = self._tp
+        self.vq.stop()
+
+    def session(self, sid, ago=600, summary=None, archived=False, cwd=None, uuid="u1"):
+        d = self.root / "a" / "b"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"local_{sid}.json").write_text(json.dumps({
+            "cliSessionId": sid, "cwd": str(cwd or self.repo), "title": f"Thread {sid}", "isArchived": archived,
+            "lastActivityAt": (time.time() - ago) * 1000, "lastAssistantUuid": uuid,
+            "postTurnSummary": summary or {}}), encoding="utf-8")
+
+    def ask(self, sid, answered=False):
+        q = {"questions": [{"question": "Which logo?", "header": "Taste: Logo",
+                            "options": [{"label": "Mark only (Recommended)"}, {"label": "Wordmark"}]}]}
+        rows = [{"type": "assistant", "uuid": "a1", "message": {"content": [
+            {"type": "tool_use", "id": "tu1", "name": "AskUserQuestion", "input": q}]}}]
+        if answered:
+            rows.append({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu1"}]}})
+        (self.tdir / f"{sid}.jsonl").write_text("".join(json.dumps(r) + chr(10) for r in rows), encoding="utf-8")
+
+    def scan(self):
+        self.vq.watch_waiting(root=self.root, once=True)
+        return [r for r in self.h.recent(50) if r.get("scan_key")]
+
+    def test_open_ask_and_blocked_summary_become_calls_once(self):
+        self.ask("s1")
+        self.session("s1")
+        blocked = {"status_category": "blocked", "needs_action": "refund the test charge", "summarizes_uuid": "u2"}
+        self.session("s2", summary=blocked, uuid="u2")
+        rows = self.scan()
+        by = {r["session_id"]: r for r in rows}
+        self.assertEqual(set(by), {"s1", "s2"})
+        self.assertEqual(by["s1"]["decision"]["options"], ["Mark only", "Wordmark"])
+        self.assertEqual(by["s1"]["decision"]["recommended"], 0)
+        self.assertEqual(by["s1"]["project"], "shop-app")
+        self.assertEqual(by["s2"]["decision"]["question"], "Refund the test charge")
+        self.assertEqual(len(self.scan()), 2)  # the same turn never makes a second call
+
+    def test_skips_answered_running_archived_and_own_runs(self):
+        self.ask("a1", answered=True)
+        self.session("a1")
+        blocked = {"status_category": "blocked", "needs_action": "check it", "summarizes_uuid": "u1"}
+        self.session("r1", ago=5, summary=blocked)                       # still working
+        self.session("x1", summary=blocked, archived=True)
+        self.session("o1", summary=blocked, cwd=voiced.data_dir())        # the summarizer's own folder
+        self.session("t1", summary=blocked, cwd=Path(tempfile.gettempdir()) / "pytest-of-y" / "t")
+        self.session("old", summary={**blocked, "summarizes_uuid": "u0"})  # summary is about an older turn
+        self.assertEqual(self.scan(), [])
+
+    def test_open_hook_call_wins_and_new_turn_replaces(self):
+        blocked = {"status_category": "blocked", "needs_action": "pick a plan", "summarizes_uuid": "u1"}
+        self.session("s3", summary=blocked)
+        self.h.add({"id": "hook1", "ts": time.time() - 500, "session_id": "s3", "cwd": str(self.repo), "text": "x",
+                    "decision": {"question": "Plan A or B?", "options": ["A", "B"]}})
+        self.assertEqual(self.scan(), [])
+        self.h.update("hook1", answer="A")
+        self.session("s3", summary={**blocked, "summarizes_uuid": "u9"}, uuid="u9")
+        rows = self.scan()
+        self.assertEqual(len(rows), 1)
+        self.assertGreater(rows[0]["ts"], self.h.get("hook1")["ts"])
 
 
 class SingleDaemonTests(unittest.TestCase):
