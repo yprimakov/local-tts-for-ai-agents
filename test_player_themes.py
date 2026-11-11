@@ -203,6 +203,44 @@ class ThemeTests(unittest.TestCase):
         finally:
             player.thread_title = old
 
+    def test_pins_order_calls_and_star(self):
+        w = self.w
+        now = time.time()
+        rows = []
+        for n, (proj, sid) in enumerate((("plain", "p1"), ("starred", "p2"), ("worked", "p3"), ("other", "p4"))):
+            r = {"id": f"pc{n}", "ts": now - 30 - n, "cwd": f"C:/x/{proj}", "project": proj, "session_id": sid,
+                 "entrypoint": "claude-desktop", "status": "spoken", "text": "x",
+                 "decision": {"question": f"{proj}?", "options": ["A", "B"], "recommended": 0}}
+            self.w.vq.history.add(r)
+            rows.append(r)
+        old = player.active_sessions
+        player.active_sessions = lambda hours: {"p3": "worked"} if hours else {}
+        try:
+            self.st.update(pinned_projects=["starred"], pinned_threads=["p4"])
+            order = [c["project"] for c in w._collect_calls_raw(None) if c["id"].startswith("pc")]
+            self.assertEqual(order, ["other", "starred", "worked", "plain"])   # thread pin, project pin, active, rest
+            self.st.update(active_hours=0)
+            order = [c["project"] for c in w._collect_calls_raw(None) if c["id"].startswith("pc")]
+            self.assertEqual(order, ["other", "starred", "plain", "worked"])   # boost off: newest first
+            self.st.update(active_hours=2, pinned_threads=[], pinned_projects=[])
+            w._set_mode("panel")
+            w._tick_once(force=True)
+            self.pump(0.2)
+            shown = w._call()
+            w._toggle_pin(shown)                                              # star it, the same call stays shown
+            self.pump(0.2)
+            w._tick_once(force=True)
+            self.assertEqual(w._call()["id"], shown["id"])
+            self.assertEqual(w.c.itemcget(w.call_pin, "text"), "★")
+            self.assertIn(shown["project"], self.st.get("pinned_projects"))
+            w._toggle_pin(shown)
+            self.assertNotIn(shown["project"], self.st.get("pinned_projects"))
+        finally:
+            player.active_sessions = old
+            self.st.update(pinned_projects=[], pinned_threads=[], active_hours=2)
+            for r in rows:
+                self.w.vq.history.update(r["id"], dismissed=True)
+
     def test_bundled_fonts_present_and_fallback(self):
         fonts = Path(player.__file__).with_name("fonts")
         for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",

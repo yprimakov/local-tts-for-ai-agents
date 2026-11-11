@@ -455,7 +455,13 @@ reply is speaking. Three sizes:
 
 - **Capsule**: project, one line of the summary, progress, and a badge for calls waiting on you
 - **Panel** (chevron or badge): the full summary, a scrub bar, skip, and **your calls**: every unanswered
-  decision from the last 24 hours across all projects, newest first (arrows step through them). Pick an
+  decision from the calls window (Settings: 6 hours to 1 week) across all projects (arrows step through them).
+  Order: pinned threads, then pinned projects, then projects you worked in lately (you typed in the session,
+  or opened it in the Claude app, within Settings > "Put threads you worked in first", default 2 hours;
+  a dot marks them), then the rest; newest first in each group. The star next to the project pins it
+  (Shift+click pins only that thread); history rows and the right-click menu have the same toggle, and
+  Settings > Behavior lists the pins with Remove. Pinned replies also jump ahead in the voice queue,
+  without cutting off the one playing. Pick an
   option (or press 1-9), or type another option or a follow-up and press Enter: it is sent to that session
   with `claude --resume <id> -p` in the background, and the session's reply plays here. A call disappears
   once you answer it, dismiss it, or the session replies again. If you answer in the thread itself

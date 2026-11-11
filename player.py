@@ -24,7 +24,7 @@ import threading
 import time
 from pathlib import Path
 
-from voiced import SKIPPED, combined_answer, decisions_of, thread_title
+from voiced import SKIPPED, active_sessions, combined_answer, decisions_of, thread_title
 
 _HERE = Path(__file__).resolve().parent
 
@@ -805,7 +805,8 @@ class MemSettings:
                    "say_source": True, "speak_background": False, "auto_open_calls": True,
                    "hide_when_idle": False, "calls_hours": 72, "desktop_answers": "send",
                    "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12,
-                   "player_width": 1.0, "theme": "ember", "minimized": False}
+                   "player_width": 1.0, "theme": "ember", "minimized": False, "reduce_motion": False,
+                   "pinned_projects": [], "pinned_threads": [], "active_hours": 2}
 
     def get(self, k):
         return self._v[k]
@@ -1337,6 +1338,18 @@ class Widget:
         c.tag_bind("callfrom", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.call_from, FG)))
         c.tag_bind("callfrom", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.call_from, MUTED)))
         self._tipify("callfrom", lambda: "Open this session")
+        self.call_pin = c.create_text(0, 0, anchor="w", text="☆", font=self.F["mono"], fill=FAINT,
+                                      tags=("pan", "ask", "callpin"))
+        c.tag_bind("callpin", "<Button-1>", lambda e: self._toggle_pin(self._call()))
+        c.tag_bind("callpin", "<Shift-Button-1>", lambda e: (self._toggle_pin(self._call(), thread=True), "break")[1])
+        c.tag_bind("callpin", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.call_pin, EMBER)))
+        c.tag_bind("callpin", "<Leave>", lambda e: (c.configure(cursor=""), self._fill(
+            self.call_pin, EMBER if self._pinned_state(self._call()) else FAINT)))
+        self._tipify("callpin", lambda: {"thread": "Pinned thread (Shift+click to unpin)",
+                                         "project": "Pinned project: its calls come first (click to unpin)"}.get(
+            self._pinned_state(self._call()), "Pin this project (Shift+click: this thread only)"))
+        self.call_act = c.create_text(0, 0, anchor="w", text="●", font=self.F["mono_s"], fill=EMBER,
+                                      state="hidden", tags=("pan", "ask"))
         self.call_nav = c.create_text(0, 0, anchor="e", text="", font=self.F["mono"], fill=FAINT, tags=("pan", "ask"))
         self.call_prev = c.create_text(0, 0, anchor="e", text=self.glyph("left"), font=self.F["icon_s"], fill=MUTED,
                                        tags=("pan", "ask", "callprev"))
@@ -1826,6 +1839,8 @@ class Widget:
         proj = (self._shown or {}).get("project")
         if proj and hasattr(self.vq, "quiet_project"):
             m.add_command(label=f"Mute {proj} for 1 hour", command=lambda: self.vq.quiet_project(proj, 3600))
+        if self.mode == "panel" and self._call():
+            self._pin_menu(m, self._call())
         m.add_separator()
         m.add_command(label="Clear the queue", command=self.vq.clear)
         m.add_command(label="Quit voice queue", command=self.quit)
@@ -2055,7 +2070,47 @@ class Widget:
                     and now - r.get("ts", 0) < 3600 * float(self.cfg.get("calls_hours"))):
                 calls.append(r)
                 seen.add(r["id"])
+        calls.sort(key=lambda r: (self._priority(r), -r.get("ts", 0)))
         return calls
+
+    # ---------------------------------------------------------- pins and priority
+    def _active_projects(self) -> set:
+        try:
+            return set(active_sessions(float(self.cfg.get("active_hours") or 0)).values())
+        except Exception:
+            return set()
+
+    def _priority(self, item) -> int:
+        """0 pinned thread, 1 pinned project, 2 a project he worked in lately, 3 the rest."""
+        if item.get("session_id") and item["session_id"] in self.cfg.get("pinned_threads"):
+            return 0
+        if item.get("project") in self.cfg.get("pinned_projects"):
+            return 1
+        if item.get("project") in self._active_projects():
+            return 2
+        return 3
+
+    def _pinned_state(self, item) -> str:
+        if not item:
+            return ""
+        if item.get("session_id") and item["session_id"] in self.cfg.get("pinned_threads"):
+            return "thread"
+        return "project" if item.get("project") in self.cfg.get("pinned_projects") else ""
+
+    def _toggle_pin(self, item, thread=False):
+        """Star: pin or unpin the item's project (or, with thread=True, only its thread)."""
+        if not item:
+            return
+        key, val = ("pinned_threads", item.get("session_id")) if thread else ("pinned_projects", item.get("project"))
+        if not val:
+            return
+        cur = self.cfg.get(key)
+        on = val not in cur
+        self.cfg.update(**{key: (cur + [val]) if on else [x for x in cur if x != val]})
+        what = (f"this {item.get('project')} thread" if thread else item.get("project"))
+        self._toast(f"Pinned {what}: its calls come first" if on else f"Unpinned {what}")
+        self._layout_key = None
+        self._tick_once(force=True)
 
     def _call(self):
         if not self._calls:
@@ -2624,6 +2679,9 @@ class Widget:
         old_ids = [self._call_id(i) for i in self._calls]
         if new_ids != old_ids:
             fresh = [i for i in new_ids if i not in old_ids]
+            was = old_ids[self._call_ix] if old_ids and self._call_ix < len(old_ids) else None
+            if was in new_ids:
+                self._call_ix = new_ids.index(was)  # a re-order (pin) keeps the call you are looking at
             self._calls = calls
             if fresh and not first:
                 self._call_ix = new_ids.index(fresh[0])
@@ -2822,9 +2880,18 @@ class Widget:
             x0 = p(PAD) + p(28) + ew + p(8)
             room = (Wp - p(PAD) - x0 - self.F["mono"].measure("Dismiss") - p(20)
                     - (self.F["mono"].measure("‹ 10/10 ›") + p(18) if len(self._calls) > 1 else 0))
+            pin = self._pinned_state(call)
+            active = not pin and self._priority(call) == 2
+            room -= p(22) + (p(14) if active else 0)
             frm = self._fit(self._where(call, "· {}"), self.F["mono"], max(p(60), room))
             self._text(self.call_from, frm)
             c.coords(self.call_from, x0, y)
+            px = x0 + self.F["mono"].measure(frm) + p(8)
+            self._text(self.call_pin, "★" if pin else "☆")
+            self._fill(self.call_pin, EMBER if pin else FAINT)
+            c.coords(self.call_pin, px, y)
+            c.coords(self.call_act, px + self.F["mono"].measure("★") + p(6), y)
+            self._call_active = active
             right = Wp - p(PAD)
             c.coords(self.call_dismiss, right, y)
             right -= self.F["mono"].measure("Dismiss") + p(20)
@@ -2866,6 +2933,7 @@ class Widget:
             c.tag_raise("ask")
         c.itemconfigure("ask", state=state(bool(call)))
         if call:
+            c.itemconfigure(self.call_act, state="normal" if getattr(self, "_call_active", False) else "hidden")
             decs, d = self._draft(call)
             in_review = len(decs) > 1 and d["ix"] >= len(decs)
             for i in (self.entry_bg, self.entry_win, self.send_bg, self.send_g):
@@ -3037,6 +3105,29 @@ class Widget:
             c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
             return ty + p(34)
 
+        def pinned(y):
+            """Pinned projects and threads, each with a Remove link."""
+            items = [("pinned_projects", v, v) for v in cfg.get("pinned_projects")]
+            items += [("pinned_threads", v, (thread_title(v) or "a thread") + " (thread)") for v in cfg.get("pinned_threads")]
+            c.create_text(x0, y + p(8), anchor="w", text="Pinned (their calls come first)", font=self.F["label"],
+                          fill=BODY, tags=("set",))
+            y += p(26)
+            if not items:
+                c.create_text(x0, y + p(6), anchor="w", text="Star a call or a history row to pin its project",
+                              font=self.F["meta"], fill=FAINT, tags=("set",))
+                return y + p(24)
+            for n, (key, val, label) in enumerate(items):
+                c.create_text(x0, y + p(8), anchor="w", text="★  " + self._ellipsize(label, self.F["meta"], x1 - x0 - p(90)),
+                              font=self.F["meta"], fill=FG, tags=("set",))
+                tag = f"unpin{n}"
+                t = c.create_text(x1, y + p(8), anchor="e", text="Remove", font=self.F["mono"], fill=MUTED,
+                                  tags=("set", tag))
+                c.tag_bind(tag, "<Button-1>", lambda e, k=key, v=val: self._set(k, [x for x in cfg.get(k) if x != v]))
+                c.tag_bind(tag, "<Enter>", lambda e, t=t: (self._tint(t, FG), c.configure(cursor="hand2")))
+                c.tag_bind(tag, "<Leave>", lambda e, t=t: (self._tint(t, MUTED), c.configure(cursor="")))
+                y += p(24)
+            return y + p(6)
+
         def toggle(key, title, hint, y):
             on = bool(cfg.get(key))
             tag = f"tg_{key}"
@@ -3189,6 +3280,9 @@ class Widget:
                    {"send": "Typed into the thread and sent, so it shows there",
                     "paste": "Typed into the thread; you press Enter",
                     "background": "Resumed out of sight; the app's thread won't show it"}, y)
+        y = slider("active_hours", "Put threads you worked in first", [0, 1, 2, 4, 24],
+                   ["Off", "Last hour", "Last 2 hours", "Last 4 hours", "Last day"], y)
+        y = pinned(y)
 
         # footer
         y += p(10)
@@ -3306,7 +3400,9 @@ class Widget:
         if key == "speed":
             return f"{v:g}\u00d7"
         if key == "calls_hours":
-            return "3d" if v == 72 else f"{v}h"
+            return "3d" if v == 72 else "1w" if v == 168 else f"{v}h"
+        if key == "active_hours":
+            return "off" if v == 0 else "1d" if v == 24 else f"{v}h"
         if key == "player_width":
             return {0.85: "N", 1.0: "M", 1.2: "W", 1.4: "XW"}[v]
         return str(v)
@@ -3379,7 +3475,8 @@ class Widget:
             keep.append(r)
         keep = keep[:60]
         sig = (tuple((r["id"], r.get("status"), bool(r.get("answer"))) for r in keep),
-               tuple(i["id"] for i in q), self._open_row, bg_count // 25)
+               tuple(i["id"] for i in q), self._open_row, bg_count // 25,
+               tuple(self.cfg.get("pinned_projects")), tuple(self.cfg.get("pinned_threads")))
         return keep, sig, bg_count
 
     def _render_library(self, rows, bg_count, q) -> int:
@@ -3433,7 +3530,20 @@ class Widget:
             label = "your call"
         room = w - nx - p(32) - (self.F["mono_s"].measure(label.upper()) + p(8) if label else 0)
         name = self._fit(self._where(it), self.F["row"], max(p(60), room))
+        room -= p(22)
+        name = self._fit(self._where(it), self.F["row"], max(p(60), room))
         l.create_text(nx, y + p(16), anchor="w", text=name, font=self.F["row"], fill=FG, tags=(tag,))
+        if it.get("project"):
+            pin = self._pinned_state(it)
+            ptag = f"pin{it['id']}"
+            star = l.create_text(w - p(36), y + h / 2, text="★" if pin else "☆", font=self.F["row"],
+                                 fill=EMBER if pin else FAINT, tags=(ptag,))
+            l.tag_bind(ptag, "<Button-1>", lambda e, it=it: (self._toggle_pin(it), self._lib_redraw()))
+            l.tag_bind(ptag, "<Shift-Button-1>", lambda e, it=it: (self._toggle_pin(it, thread=True),
+                                                                    self._lib_redraw(), "break")[2])
+            l.tag_bind(ptag, "<Enter>", lambda e, s_=star: (l.configure(cursor="hand2"), l.itemconfigure(s_, fill=EMBER)))
+            l.tag_bind(ptag, "<Leave>", lambda e, s_=star, on=bool(pin): (
+                l.configure(cursor=""), l.itemconfigure(s_, fill=EMBER if on else FAINT)))
         if label:
             lx = nx + self.F["row"].measure(name) + p(8)
             l.create_text(lx, y + p(16), anchor="w", text=label.upper(), font=self.F["mono_s"],
@@ -3531,7 +3641,24 @@ class Widget:
         if it.get("project") and hasattr(self.vq, "quiet_project"):
             m.add_command(label=f"Mute {it['project']} for 1 hour",
                           command=lambda: self.vq.quiet_project(it["project"], 3600))
+        self._pin_menu(m, it)
         m.tk_popup(e.x_root, e.y_root)
+
+    def _pin_menu(self, m, it):
+        if not it or not it.get("project"):
+            return
+        m.add_separator()
+        on = it["project"] in self.cfg.get("pinned_projects")
+        m.add_command(label=f"{'Unpin' if on else 'Pin'} project {it['project']}",
+                      command=lambda: (self._toggle_pin(it), self._lib_redraw()))
+        if it.get("session_id"):
+            ton = it["session_id"] in self.cfg.get("pinned_threads")
+            m.add_command(label="Unpin this thread" if ton else "Pin this thread only",
+                          command=lambda: (self._toggle_pin(it, thread=True), self._lib_redraw()))
+
+    def _lib_redraw(self):
+        self._lib_sig = None
+        self._layout_key = None
 
     def run(self):
         self.root.mainloop()

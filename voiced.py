@@ -76,6 +76,10 @@ SETTINGS_SCHEMA = {
     "theme": (["ember", "graphite", "midnight", "daylight"], "ember"),
     "reduce_motion": (bool, False),  # also on when Windows "Animation effects" is off
     "minimized": (bool, False),  # the player is a small orb; kept across restarts
+    # priority: pinned threads (session ids), then pinned projects, then threads he worked in lately
+    "pinned_projects": (list, []),
+    "pinned_threads": (list, []),
+    "active_hours": ([0, 1, 2, 4, 24], 2),  # 0 = no automatic boost
 }
 
 
@@ -86,7 +90,7 @@ class Settings:
         self.path = path
         self._lock = threading.Lock()
         self.version = 0
-        self._v = {k: d for k, (_, d) in SETTINGS_SCHEMA.items()}
+        self._v = {k: (list(d) if isinstance(d, list) else d) for k, (_, d) in SETTINGS_SCHEMA.items()}
         if path:
             try:
                 saved = json.loads(path.read_text(encoding="utf-8"))
@@ -103,13 +107,17 @@ class Settings:
             allowed = SETTINGS_SCHEMA[k][0]
             if allowed is bool and isinstance(v, bool):
                 out[k] = v
+            elif allowed is list:
+                if isinstance(v, list):
+                    out[k] = list(dict.fromkeys(str(x) for x in v if str(x).strip()))[:200]
             elif allowed is not bool and v in allowed:
                 out[k] = v
         return out
 
     def get(self, key: str):
         with self._lock:
-            return self._v[key]
+            v = self._v[key]
+            return list(v) if isinstance(v, list) else v
 
     def all(self) -> dict:
         with self._lock:
@@ -608,9 +616,32 @@ class VoiceQueue:
             if self.summarizer:
                 item["ready"] = False
                 self._todo.append(item)
-            self.queue.append(item)
+            self._enqueue(item)
             self._cv.notify_all()
         return item
+
+    def _pinned(self, item: dict) -> bool:
+        try:
+            return (item.get("session_id") in self.settings.get("pinned_threads")
+                    or item.get("project") in self.settings.get("pinned_projects"))
+        except Exception:
+            return False
+
+    def _rank(self, item: dict) -> int:
+        """Queue order: replays, pinned calls, pinned replies, calls, the rest. The one playing is never cut."""
+        if item.get("replay_of"):
+            return 0
+        pinned, call = self._pinned(item), bool(item.get("decision"))
+        return 1 if pinned and call else 2 if pinned else 3 if call else 4
+
+    def _enqueue(self, item: dict) -> None:
+        """Put an item in the queue after everything that ranks the same or higher (caller holds the lock)."""
+        if item in self.queue:
+            self.queue.remove(item)
+        r, at = self._rank(item), 0
+        while at < len(self.queue) and self._rank(self.queue[at]) <= r:
+            at += 1
+        self.queue.insert(at, item)
 
     def watch_answers(self, every: float = 4.0, hours: float = 72) -> None:
         """A call answered in its own thread (Yury typed there) is closed here too, without waiting for the
@@ -748,12 +779,8 @@ class VoiceQueue:
                         self.queue.remove(item)
                         item["status"] = "not spoken: nothing to say"
                     elif item.get("decision") and item in self.queue:
-                        # a reply that needs Yury plays before plain status updates (replays stay first)
-                        self.queue.remove(item)
-                        at = 0
-                        while at < len(self.queue) and (self.queue[at].get("replay_of") or self.queue[at].get("decision")):
-                            at += 1
-                        self.queue.insert(at, item)
+                        # a reply that needs Yury plays before plain status updates (replays and pins stay first)
+                        self._enqueue(item)
                 else:
                     item["text"] = plain_speech(item.get("message", "")) or (
                         "Finished with technical output. The details are in the session.")
@@ -1332,6 +1359,37 @@ def _desktop_files(root: Path | None = None, ttl: float = 30) -> dict:
         pass
     if root is None:
         _DESKTOP_MAP[:] = [time.time(), out]
+    return out
+
+
+_ACTIVE: list = [0.0, 0.0, {}]  # [built at, for hours, {session id: project}]
+
+
+def active_sessions(hours: float, root: Path | None = None, ttl: float = 30) -> dict:
+    """Threads Yury worked in lately: he typed into it (latestUserFrameAt) or opened it (lastFocusedAt) in the
+    Claude app within `hours`. {cli session id: project}. Cached for 30 s."""
+    if not hours:
+        return {}
+    if root is None and time.time() - _ACTIVE[0] < ttl and _ACTIVE[1] == hours:
+        return _ACTIVE[2]
+    base = root or (Path(os.environ.get("APPDATA", "")) / "Claude" / "claude-code-sessions")
+    cutoff, out = (time.time() - hours * 3600) * 1000, {}
+    try:
+        files = list(base.glob("*/*/local_*.json"))
+    except OSError:
+        files = []
+    for f in files:
+        try:
+            if f.stat().st_mtime * 1000 < cutoff:
+                continue
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        seen = max(float(d.get("latestUserFrameAt") or 0), float(d.get("lastFocusedAt") or 0))
+        if d.get("cliSessionId") and seen >= cutoff and not d.get("isArchived"):
+            out[str(d["cliSessionId"])] = source_of(str(d.get("cwd") or ""))["project"]
+    if root is None:
+        _ACTIVE[:] = [time.time(), hours, out]
     return out
 
 

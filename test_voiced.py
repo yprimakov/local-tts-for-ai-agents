@@ -410,6 +410,50 @@ class ThreadNameTests(unittest.TestCase):
         self.assertEqual(voiced.spoken_text(item, say_source=False), "Done.")
 
 
+class PinTests(unittest.TestCase):
+    def test_pins_persist(self):
+        path = Path(tempfile.mkdtemp()) / "settings.json"
+        st = voiced.Settings(path)
+        st.update(pinned_projects=["paperclip.ai", "paperclip.ai", "go-getter-bot"], pinned_threads=["s1"],
+                  active_hours=4)
+        again = voiced.Settings(path)
+        self.assertEqual(again.get("pinned_projects"), ["paperclip.ai", "go-getter-bot"])
+        self.assertEqual(again.get("pinned_threads"), ["s1"])
+        self.assertEqual(again.get("active_hours"), 4)
+        again.get("pinned_projects").append("x")                       # a copy: the store is not changed
+        self.assertEqual(again.get("pinned_projects"), ["paperclip.ai", "go-getter-bot"])
+        st.update(pinned_projects="not a list")
+        self.assertEqual(voiced.Settings(path).get("pinned_projects"), ["paperclip.ai", "go-getter-bot"])
+
+    def test_pinned_replies_play_first(self):
+        h = voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl")
+        st = voiced.Settings()
+        st.update(pinned_projects=["star"], summaries=False)
+        vq = voiced.VoiceQueue(h, fake_synth, FakePlayer, settings=st)
+        vq.say("one", "C:/x/plain", "a")
+        vq.say("two", "C:/x/star", "b")
+        vq.say("three", "C:/x/plain2", "c")
+        vq.say("four", "C:/x/star", "d")
+        self.assertEqual([i["text"] for i in vq.queue], ["two", "four", "one", "three"])
+        call = {"id": "z", "project": "star", "decision": {"question": "?"}, "session_id": "e"}
+        with vq._cv:
+            vq._enqueue(call)
+        self.assertEqual(vq.queue[0]["id"], "z")                      # a pinned call goes before pinned replies
+        vq.stop()
+
+    def test_active_sessions(self):
+        root = Path(tempfile.mkdtemp())
+        d = root / "a" / "b"
+        d.mkdir(parents=True)
+        now = time.time() * 1000
+        for n, (typed, focused) in enumerate(((now - 600e3, 0), (0, now - 1800e3), (now - 5 * 3600e3, 0))):
+            (d / f"local_{n}.json").write_text(json.dumps({"cliSessionId": f"s{n}", "cwd": f"C:/x/p{n}",
+                                                           "latestUserFrameAt": typed, "lastFocusedAt": focused}),
+                                               encoding="utf-8")
+        self.assertEqual(voiced.active_sessions(2, root=root), {"s0": "p0", "s1": "p1"})
+        self.assertEqual(voiced.active_sessions(0, root=root), {})
+
+
 class SingleDaemonTests(unittest.TestCase):
     def test_second_daemon_cannot_bind(self):
         srv = voiced.make_server(None, 0)
