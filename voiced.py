@@ -520,6 +520,25 @@ class History:
 
 
 # ---------------------------------------------------------------- the queue
+_CHAN = re.compile(r"^chan_\w{6,120}$")
+_THREAD = re.compile(r"^(?:cmsg|session|ses|cse)_\w{6,120}$")
+
+
+def project_link(msg_id: str, project_id: str = "", thread_id: str = "") -> str:
+    """The Claude app's own link to a Project (and its thread and message): claude://code/project/<chan_id>.
+    The app routes it to the project page; thread= opens the thread, msg= the message (app.asar, KN/xPr)."""
+    msg_id = msg_id if re.match(r"^cmsg_\w{6,120}$", msg_id or "") else ""
+    if not _CHAN.match(project_id or "") and msg_id:
+        # ponytail: a message id starts with its project's id (cmsg_<24 chars of chan id>...), seen on every push;
+        # pass project_id when that stops holding
+        project_id = "chan_" + msg_id[5:29]
+    if not _CHAN.match(project_id or ""):
+        return ""
+    q = "&".join(f"{k}={v}" for k, v in (("thread", thread_id if _THREAD.match(thread_id or "") else ""),
+                                          ("msg", msg_id)) if v)
+    return f"claude://code/project/{project_id}" + (f"?{q}" if q else "")
+
+
 class VoiceQueue:
     """FIFO: exactly one item is spoken at a time. synth(text) -> wav path; player(wav) -> AudioPlayer-like."""
 
@@ -705,7 +724,8 @@ class VoiceQueue:
         log(f"call {item['id']} ({src['project']}) waits for a permission")
         return item
 
-    def push_call(self, cid: str, project: str, thread: str, question: str, options=None, url: str = "") -> dict | None:
+    def push_call(self, cid: str, project: str, thread: str, question: str, options=None, url: str = "",
+                  project_id: str = "", thread_id: str = "") -> dict | None:
         """A call pushed from outside (a cloud Claude app Project thread, through a session on this PC).
         Upserted by id: a newer push for the same id replaces the open one. It is spoken like a reply (mute,
         project mute and pins apply), and answered where the thread runs: every option opens its url."""
@@ -719,7 +739,7 @@ class VoiceQueue:
                 self.history.update(r["id"], dismissed=True)
         url = str(url or "").strip()
         if not re.match(r"^(https://claude\.ai/|claude://)", url):
-            url = ""  # only links into Claude are opened
+            url = project_link(cid, project_id, thread_id)  # only links into Claude are opened
         opts = [" ".join(str(o).split())[:60] for o in (options if isinstance(options, list) else []) if str(o).strip()][:4]
         proj = " ".join(str(project or "Claude project").split())[:60]
         dec = {"question": question[:1].upper() + question[1:], "options": opts or ["Open"],
@@ -1197,7 +1217,8 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 return self._json(200, {"ok": vq.push_done(unquote(m.group(1)))})
             if self.path == "/calls/push":  # a cloud Claude app Project thread needs Yury
                 it = vq.push_call(str(d.get("id") or ""), str(d.get("project") or ""), str(d.get("thread") or ""),
-                                  str(d.get("question") or ""), d.get("options"), str(d.get("url") or ""))
+                                  str(d.get("question") or ""), d.get("options"), str(d.get("url") or ""),
+                                  str(d.get("project_id") or ""), str(d.get("thread_id") or ""))
                 return self._json(200 if it else 400, it or {"ok": False, "error": "id and question are required"})
             if self.path == "/show":  # the "Voice player" shortcut
                 vq.show_requested = True
@@ -1697,6 +1718,10 @@ def open_session(item: dict) -> str:
     host = item.get("host") or {}
     kind, sid, cwd = host.get("kind"), item.get("session_id") or "", item.get("cwd") or ""
     try:
+        if item.get("kind") == "project":  # a call pushed from a Claude app Project thread: the app's project link
+            url = item.get("url") or project_link(item.get("push_id") or "")
+            os.startfile(url or "claude://")
+            return "Opened the project in Claude" if url else "Opened Claude: find the thread there"
         app_id = desktop_session_id(sid) if sys.platform == "win32" else ""
         if app_id:  # a Claude app session (wherever the reply was spoken from): its own link opens it
             os.startfile(f"claude://code/continue?session={app_id}&source=desktop_action")

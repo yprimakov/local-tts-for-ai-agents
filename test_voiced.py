@@ -317,6 +317,17 @@ class OpenSessionTests(unittest.TestCase):
         self.assertEqual(self.focused, [42])                                     # terminal session: focus its window
         self.assertIn("Switched to", r)
 
+    def test_project_call_opens_the_apps_project_link(self):
+        cm = "cmsg_01GhD8RUjuvoUnecntcx3GwmXP4rkPi1XmARRrdKRKbM7q"
+        r = voiced.open_session({"kind": "project", "session_id": f"cloud:{cm}", "push_id": cm, "url": "", "host": {}})
+        self.assertEqual(self.opened[-1], f"claude://code/project/chan_01GhD8RUjuvoUnecntcx3Gwm?msg={cm}")
+        self.assertIn("project", r)
+        voiced.open_session({"kind": "project", "push_id": "poc-1", "url": ""})   # no project id to link: the app
+        self.assertEqual(self.opened[-1], "claude://")
+        self.assertEqual(voiced.project_link(cm, "chan_abcdef123", "session_01Abc123"),
+                         f"claude://code/project/chan_abcdef123?thread=session_01Abc123&msg={cm}")
+        self.assertEqual(voiced.project_link("x", "chan_abcdef123", "bad id&x=1"), "claude://code/project/chan_abcdef123")
+
 
 class AnswerPathTests(unittest.TestCase):
     def test_answer_queue_long_poll_and_ack(self):

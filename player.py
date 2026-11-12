@@ -2600,18 +2600,6 @@ class Widget:
     def _open(self, item):
         if not item:
             return
-        if item.get("kind") == "project":  # a cloud Project thread: open its link
-            if item.get("url"):
-                import webbrowser
-                webbrowser.open(item["url"])
-                self._toast("Opening the thread in Claude")
-            else:
-                try:
-                    os.startfile("claude://")  # no link: bring up the Claude app
-                except (OSError, AttributeError):
-                    pass
-                self._toast("Answer copied: paste it in the Claude app thread")
-            return
         msg = self.api.open_session(item)
         if not msg and item.get("session_id"):
             self._copy(self._resume_cmd(item))
