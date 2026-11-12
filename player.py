@@ -798,6 +798,9 @@ class MiniOrb:
             pass
 
 
+APP_ID = "MadeFire.EmberVoicePlayer"  # taskbar group; stamp the same id on the Start shortcut so a pinned button relaunches it
+
+
 class MemSettings:
     """Stand-in when the queue has no settings store (tests, harness)."""
     def __init__(self):
@@ -845,6 +848,12 @@ class Widget:
                 pass
         load_fonts()
         self.tk, self.vq, self.api = tk, vq, api
+        if sys.platform == "win32":
+            try:  # its own taskbar group (not every pythonw app's), the same id as the Start shortcut
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_ID)
+            except Exception:
+                pass
         self.root = root = tk.Tk()
         root.report_callback_exception = lambda *exc: api.log(
             "player error: " + "".join(__import__("traceback").format_exception(*exc))[-1500:])
@@ -867,6 +876,8 @@ class Widget:
             except tk.TclError:
                 pass
         root.configure(bg=KEY)
+        self._tb_hidden = False
+        self._anchor = self._taskbar_anchor()
 
         # state
         self.mode = "cap"           # cap | panel
@@ -1745,6 +1756,40 @@ class Widget:
                 self._glass.show()
         else:
             self.show()
+
+    # ---------------------------------------------------------- taskbar button
+    def _taskbar_anchor(self):
+        """The player's taskbar button. The card is a borderless tool window, which gets no button, so Win+D
+        hid it for good. This invisible normal window owns the button: Win+D or a click on the button while it
+        is active minimizes it, and the player hides with it; a click or Alt+Tab brings the player back."""
+        tk = self.tk
+        a = tk.Toplevel(self.root)
+        a.title("Ember Voice Player")
+        a.geometry("1x1+-32000+-32000")
+        try:
+            a.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+        a.protocol("WM_DELETE_WINDOW", self.minimize)  # "Close window" on the button: down to the orb
+        a.bind("<Unmap>", lambda e: e.widget is a and a.state() == "iconic" and self._tb_hide())
+        a.bind("<Map>", lambda e: e.widget is a and self._tb_show())
+        a.bind("<FocusIn>", lambda e: e.widget is a and self._tb_show())
+        return a
+
+    def _tb_hide(self):
+        self._tb_hidden = True
+        self._tip_hide()
+        if self._mini:
+            self._mini.top.withdraw()
+            if self._mini.glass:
+                self._mini.glass.u.ShowWindow(self._mini.glass.hw[0], 0)
+        elif self._visible:
+            self.hide_until_next()  # back for the next voiceover, like the menu's hide
+
+    def _tb_show(self):
+        if self._tb_hidden or not (self._visible or self._mini):
+            self._tb_hidden = False
+            self.summon()
 
     def _on_screen(self) -> bool:
         """True when the player's top-left area lies on a connected monitor (Windows; elsewhere assume so)."""
