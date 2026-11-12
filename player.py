@@ -2191,7 +2191,23 @@ class Widget:
 
     def _reply(self, call, text):
         """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
-        if call.get("kind") in ("approve", "project"):  # answered where the thread runs: open it
+        if call.get("kind") == "project":  # a cloud thread: the answer goes back through the watcher
+            if text and text != SKIPPED:
+                try:
+                    sent = self.vq.answer_push(call, text)
+                except Exception as e:
+                    self.api.log(f"answer push: {e!r}")
+                    sent = None
+                if sent:
+                    call["sent_answer"] = text
+                    self._layout_key = None
+                    self._toast(f"Sent to {call.get('thread') or call.get('project')}: {text}")
+                    self._tick_once(force=True)
+                    return
+                self._copy(text)  # no way back: copy it and open the app
+            self._open(call)
+            return
+        if call.get("kind") == "approve":  # approving happens where the session runs: open it
             self._open(call)
             return
         decs, d = self._draft(call)
@@ -2594,7 +2610,7 @@ class Widget:
                     os.startfile("claude://")  # no link: bring up the Claude app
                 except (OSError, AttributeError):
                     pass
-                self._toast("Answer it in the Claude app: " + (item.get("project") or "the project"))
+                self._toast("Answer copied: paste it in the Claude app thread")
             return
         msg = self.api.open_session(item)
         if not msg and item.get("session_id"):
@@ -2889,7 +2905,7 @@ class Widget:
             y += p(14)
             c.coords(self.call_rule, p(PAD), y, p(PAD) + p(20), y)
             c.coords(self.call_eyebrow, p(PAD) + p(28), y)
-            eyebrow = "APP CALL" if call.get("kind") == "project" else "YOUR CALL"  # from a cloud Project thread
+            eyebrow = ("SENT · WAITING" if call.get("sent_answer") else "APP CALL") if call.get("kind") == "project"                 else "YOUR CALL"  # from a cloud Project thread
             self._text(self.call_eyebrow, eyebrow)
             ew = self.F["mono"].measure(eyebrow)
             x0 = p(PAD) + p(28) + ew + p(8)

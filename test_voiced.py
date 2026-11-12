@@ -287,6 +287,72 @@ class RemoteSessionTests(unittest.TestCase):
             voiced.remote_spawned = old
 
 
+class OpenSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.opened, self.focused = [], []
+        self._saved = (voiced.os.startfile if hasattr(voiced.os, "startfile") else None,
+                       voiced.desktop_session_id, voiced.focus_pid)
+        voiced.os.startfile = lambda u: self.opened.append(u)
+        voiced.desktop_session_id = lambda sid, root=None: {"cli-desk": "local_abc"}.get(sid, "")
+        voiced.focus_pid = lambda pid, hint="": self.focused.append(pid) or True
+
+    def tearDown(self):
+        sf, voiced.desktop_session_id, voiced.focus_pid = self._saved
+        if sf:
+            voiced.os.startfile = sf
+
+    def test_each_kind_opens_its_target(self):
+        r = voiced.open_session({"session_id": "cli-desk", "host": {"kind": "desktop"}, "project": "p · thread"})
+        self.assertEqual(self.opened[-1], "claude://code/continue?session=local_abc&source=desktop_action")
+        self.assertEqual(r, "Opened in Claude")                                  # desktop thread, any display name
+        voiced.open_session({"session_id": "cli-desk", "host": {}, "scan_key": "x"})  # scanner call, no host
+        self.assertEqual(self.opened[-1], "claude://code/continue?session=local_abc&source=desktop_action")
+        voiced.open_session({"session_id": "gone", "host": {"kind": "desktop"}})
+        self.assertIn("needs-input", self.opened[-1])                            # app session not on disk
+        n = len(self.opened)
+        r = voiced.open_session({"session_id": "child", "host": {"kind": "desktop"}, "headless": True})
+        self.assertEqual(len(self.opened), n)                                    # a background run: nothing to open
+        self.assertIn("background run", r)
+        r = voiced.open_session({"session_id": "t1", "host": {"kind": "terminal", "pid": 42}, "project": "x"})
+        self.assertEqual(self.focused, [42])                                     # terminal session: focus its window
+        self.assertIn("Switched to", r)
+
+
+class AnswerPathTests(unittest.TestCase):
+    def test_answer_queue_long_poll_and_ack(self):
+        path = Path(tempfile.mkdtemp()) / "h.jsonl"
+        vq = voiced.VoiceQueue(voiced.History(path), fake_synth, FakePlayer)
+        srv = voiced.make_server(vq, 0)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            it = vq.push_call("c1", "Ember OS HomeLab", "Ember OS Design", "What is CIG?", ["Client", "Venture"])
+            got = {}
+            t = threading.Thread(target=lambda: got.update(
+                r=urllib.request.urlopen(f"http://127.0.0.1:{port}/calls/answers/next?timeout=5", timeout=10)))
+            t.start()
+            time.sleep(0.3)
+            vq.answer_push(it, "Venture")                                        # the click wakes the long poll
+            t.join(8)
+            self.assertEqual(got["r"].status, 200)
+            a = json.loads(got["r"].read())
+            self.assertEqual((a["id"], a["answer"], a["thread"]), ("c1", "Venture", "Ember OS Design"))
+            self.assertEqual(vq.history.get(it["id"])["sent_answer"], "Venture")   # the call stays, marked sent
+            self.assertFalse(vq.history.get(it["id"]).get("answer"))
+            again = voiced.VoiceQueue(voiced.History(path), fake_synth, FakePlayer)
+            self.assertEqual(again.next_answer(0)["answer"], "Venture")          # persisted until acked
+            again.stop()
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/calls/answers/c1/ack", data=b"{}",
+                                         headers={"content-type": "application/json"})
+            self.assertTrue(json.loads(urllib.request.urlopen(req, timeout=2).read())["ok"])
+            r = urllib.request.urlopen(f"http://127.0.0.1:{port}/calls/answers/next?timeout=0.2", timeout=5)
+            self.assertEqual(r.status, 204)                                      # nothing left
+            self.assertIsNone(vq.answer_push({"id": "z"}, "x"))                  # not a pushed call
+        finally:
+            srv.shutdown()
+            vq.stop()
+
+
 class WatchAnswersTests(unittest.TestCase):
     def test_multi_question_call_answered_in_thread_closes(self):
         import datetime as dt

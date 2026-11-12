@@ -241,6 +241,18 @@ class ThemeTests(unittest.TestCase):
             for r in rows:
                 self.w.vq.history.update(r["id"], dismissed=True)
 
+    def test_app_call_click_sends_the_answer(self):
+        w = self.w
+        it = w.vq.push_call("pc-click", "Ember OS HomeLab", "Ember OS Design", "What is CIG?", ["Client", "Venture"])
+        try:
+            w._reply(it, "Venture")
+            a = w.vq.next_answer(0)
+            self.assertEqual((a["id"], a["answer"]), ("pc-click", "Venture"))
+            self.assertEqual(w.vq.history.get(it["id"])["sent_answer"], "Venture")
+        finally:
+            w.vq.ack_answer("pc-click")
+            w.vq.push_done("pc-click")
+
     def test_bundled_fonts_present_and_fallback(self):
         fonts = Path(player.__file__).with_name("fonts")
         for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",

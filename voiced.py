@@ -540,6 +540,10 @@ class VoiceQueue:
         self._skip = threading.Event()
         self._cv = threading.Condition()
         self._stop = False
+        hp = getattr(history, "path", None)
+        self._answers_path = Path(hp).with_name("answers.json") if hp else None
+        self._ans_cv = threading.Condition()
+        self._answers: list[dict] = self._load_answers()
         self.window = {"hidden": None}  # set by the player: None, "until next voiceover", "until HH:MM"
         self.show_requested = False
         self.hide_requested = False
@@ -736,6 +740,54 @@ class VoiceQueue:
                 self._cv.notify_all()
         log(f"call {item['id']} ({proj}) pushed from a cloud thread")
         return item
+
+    # ---- the way back: an answer to a pushed call goes to its cloud thread (a watcher long-polls for it)
+    def _load_answers(self) -> list[dict]:
+        try:
+            d = json.loads(self._answers_path.read_text(encoding="utf-8")) if self._answers_path else []
+            return [a for a in d if isinstance(a, dict) and a.get("id")]
+        except (OSError, ValueError):
+            return []
+
+    def _save_answers(self) -> None:
+        if self._answers_path:
+            tmp = self._answers_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._answers), encoding="utf-8")
+            os.replace(tmp, self._answers_path)
+
+    def answer_push(self, item: dict, text: str) -> dict | None:
+        """Yury picked an option (or typed) on a pushed call: queue it for the thread. The call stays open,
+        marked as sent, until the thread reports DONE."""
+        cid, text = item.get("push_id") or "", " ".join(str(text or "").split())[:2000]
+        if not cid or not text:
+            return None
+        a = {"id": cid, "project": item.get("project") or "", "thread": item.get("thread") or "",
+             "question": (item.get("decision") or {}).get("question", ""), "answer": text, "at": time.time()}
+        with self._ans_cv:
+            self._answers = [x for x in self._answers if x["id"] != cid] + [a]  # a newer pick replaces it
+            self._save_answers()
+            self._ans_cv.notify_all()
+        self.history.update(item["id"], sent_answer=text, sent_at=a["at"])
+        log(f"call {item['id']} ({a['project']}) answer queued for its thread")
+        return a
+
+    def next_answer(self, timeout: float = 600) -> dict | None:
+        """The oldest answer not yet acknowledged; waits up to timeout seconds for one."""
+        end = time.time() + max(0.0, min(float(timeout), 3600))
+        with self._ans_cv:
+            while not self._answers and not self._stop:
+                left = end - time.time()
+                if left <= 0:
+                    return None
+                self._ans_cv.wait(min(left, 5))
+            return dict(self._answers[0]) if self._answers else None
+
+    def ack_answer(self, cid: str) -> bool:
+        with self._ans_cv:
+            n = len(self._answers)
+            self._answers = [x for x in self._answers if x["id"] != cid]
+            self._save_answers()
+            return len(self._answers) < n
 
     def push_done(self, cid: str) -> bool:
         """The thread saw the answer: close its pushed call."""
@@ -1097,6 +1149,18 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 return self._json(200, vq.history.recent())
             if self.path == "/settings":
                 return self._json(200, vq.settings.all())
+            if self.path.startswith("/calls/answers/next"):  # long poll: the watcher waits here
+                from urllib.parse import parse_qs, urlparse
+                try:
+                    t = float((parse_qs(urlparse(self.path).query).get("timeout") or ["600"])[0])
+                except ValueError:
+                    t = 600
+                a = vq.next_answer(t)
+                if not a:
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                return self._json(200, a)
             self._json(404, {"error": "not found"})
 
         def do_POST(self):
@@ -1123,6 +1187,10 @@ def make_server(vq: VoiceQueue | None, port: int = PORT) -> ThreadingHTTPServer:
                 it = vq.add_waiting(str(d.get("session_id") or ""), str(d.get("cwd") or ""),
                                     str(d.get("message") or ""), entrypoint=str(d.get("entrypoint") or ""), host=host)
                 return self._json(200, it or {"ok": False})
+            m = re.fullmatch(r"/calls/answers/([^/]{1,120})/ack", self.path)
+            if m:
+                from urllib.parse import unquote
+                return self._json(200, {"ok": vq.ack_answer(unquote(m.group(1)))})
             m = re.fullmatch(r"/calls/push/([^/]{1,120})/done", self.path)
             if m:  # a pushed call's thread saw the answer
                 from urllib.parse import unquote
@@ -1633,6 +1701,8 @@ def open_session(item: dict) -> str:
         if app_id:  # a Claude app session (wherever the reply was spoken from): its own link opens it
             os.startfile(f"claude://code/continue?session={app_id}&source=desktop_action")
             return "Opened in Claude"
+        if item.get("headless") and not app_id:
+            return "A background run: it has no session to open"
         if kind == "desktop":  # not found: the app's list of sessions waiting for you
             os.startfile("claude://code/needs-input?source=desktop_action")
             return "Opened Claude's sessions waiting for you"
