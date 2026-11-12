@@ -65,7 +65,7 @@ SETTINGS_SCHEMA = {
     "speak_remote_sessions": (bool, False),
     "auto_open_calls": (bool, True),
     "hide_when_idle": (bool, False),
-    "calls_hours": ([6, 12, 24, 72, 168], 72),
+    "calls_hours": ([6, 12, 24, 72, 168], 24),
     # answers to a session open in the Claude app: type them into its thread and send, paste only, or the old
     # background `claude --resume -p` (invisible in the app's thread, which then goes out of date)
     "desktop_answers": (["send", "paste", "background"], "send"),
@@ -400,6 +400,57 @@ def decisions_of(item: dict) -> list[dict]:
     return [item["decision"]] if item.get("decision") else []
 
 
+_DEC_HEAD = re.compile(r"^\s*(?:#{1,6}\s*)?\**\s*decisions?\s*\**\s*:?\s*$", re.I)
+_DEC_ITEM = re.compile(r"^\s*(\d+)[.)]\s+(.+)$")
+_DEC_OPT = re.compile(r"^\s*(?:[-*•]\s*)?\**([A-F])[.)]\**\s+(.+)$")
+
+
+def _md(s: str) -> str:
+    return re.sub(r"[*`]+", "", s).strip()
+
+
+def parse_decisions(text: str) -> list[dict]:
+    """The reply's own "Decisions" block (numbered items, lettered options, "(Recommended)"), read straight
+    from its text so nothing depends on the summarizer catching every question. [] when there is none."""
+    lines = (text or "").splitlines()
+    start = max((i for i, l in enumerate(lines) if _DEC_HEAD.match(l)), default=None)
+    if start is None:
+        return []
+    items: list[dict] = []
+    for line in lines[start + 1:]:
+        if not line.strip():
+            continue
+        m = _DEC_OPT.match(line)
+        if m and items:
+            items[-1]["opts"].append(f"{m.group(1)}. {_md(m.group(2))}")
+            continue
+        m = _DEC_ITEM.match(line)
+        if m:
+            items.append({"q": _md(m.group(2)), "opts": []})
+            continue
+        if line[:1].isspace() and items:  # a wrapped line
+            if items[-1]["opts"]:
+                items[-1]["opts"][-1] += " " + _md(line)
+            else:
+                items[-1]["q"] += " " + _md(line)
+            continue
+        break
+    out = []
+    for it in items:
+        rec = next((i for i, o in enumerate(it["opts"]) if re.search(r"\(recommended\)", o, re.I)), None)
+        opts = [re.sub(r"\s*\(recommended\)\.?", "", o, flags=re.I).strip()[:160] for o in it["opts"]][:4]
+        out.append({"question": it["q"][:240], "options": opts, "context": "",
+                    "recommended": rec if rec is not None and rec < len(opts) else None})
+    return out
+
+
+def call_decisions(item: dict) -> list[dict]:
+    """What a reply asks Yury: its explicit Decisions block when it has one, else the summarizer's questions."""
+    if item.get("kind") in ("project", "approve"):
+        return decisions_of(item)
+    return parse_decisions(item.get("message") or "") or decisions_of(item)
+
+
 SKIPPED = "(skipped: use your judgment)"
 
 
@@ -680,7 +731,7 @@ class VoiceQueue:
         while not self._stop:
             try:
                 for r in self.history.recent(3000):
-                    if (not decisions_of(r) or r.get("answer") or r.get("dismissed") or r.get("headless")
+                    if (not call_decisions(r) or r.get("answer") or r.get("dismissed") or r.get("headless")
                             or time.time() - r.get("ts", 0) > hours * 3600):
                         continue
                     p = transcript_path(r.get("cwd") or "", r.get("session_id") or "")
@@ -748,7 +799,8 @@ class VoiceQueue:
         item = {"id": uuid.uuid4().hex[:12], "ts": time.time(), "text": f"Needs you: {dec['question']}",
                 "cwd": "", "session_id": sid, "entrypoint": "claude-project", "project": proj, "headless": False,
                 "thread": " ".join(str(thread or "").split())[:80], "status": "queued", "message": dec["question"],
-                "host": {}, "kind": "project", "push_id": cid, "url": url, "decisions": [dec], "decision": dec}
+                "host": {}, "kind": "project", "push_id": cid, "url": url,
+                "thread_id": thread_id if _THREAD.match(thread_id or "") else "", "decisions": [dec], "decision": dec}
         silent = "muted" if self.muted else ("project muted" if self.quiet.get(proj, 0) > time.time() else "")
         if silent:
             item["status"] = f"not spoken: {silent}"

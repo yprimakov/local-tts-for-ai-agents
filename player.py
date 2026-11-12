@@ -25,7 +25,7 @@ import threading
 import time
 from pathlib import Path
 
-from voiced import SKIPPED, active_sessions, combined_answer, decisions_of, thread_title
+from voiced import SKIPPED, active_sessions, call_decisions, combined_answer, decisions_of, thread_title
 
 _HERE = Path(__file__).resolve().parent
 
@@ -807,7 +807,7 @@ class MemSettings:
         self.version = 0
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
                    "say_source": True, "speak_background": False, "speak_remote_sessions": False, "auto_open_calls": True,
-                   "hide_when_idle": False, "calls_hours": 72, "desktop_answers": "send",
+                   "hide_when_idle": False, "calls_hours": 24, "desktop_answers": "send",
                    "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12,
                    "player_width": 1.0, "theme": "ember", "minimized": False, "reduce_motion": False,
                    "pinned_projects": [], "pinned_threads": [], "active_hours": 2}
@@ -2095,29 +2095,57 @@ class Widget:
         return calls
 
     def _collect_calls_raw(self, cur) -> list[dict]:
+        """One call per thread: every decision it asked since Yury last wrote there (watch_answers closes rows
+        once he does), oldest first, a re-asked item replacing its earlier wording in place. A new reply's
+        decisions join the end of the group. Cloud pushes group by their thread."""
         now = time.time()
-        calls, seen = [], set()
-        # by age, not count: a busy day writes 60+ rows, so the last 150 rows covered under 3 days
-        rows = self.vq.history.since(now - 3600 * float(self.cfg.get("calls_hours")) - 86400)
-        newest: dict[str, float] = {}  # a later reply from the same session means it was answered there
-        for r in rows:
-            sid = r.get("session_id")
-            if sid and r.get("status") not in BACKGROUND:
-                newest[sid] = max(newest.get(sid, 0), r.get("ts", 0))
-        cur_row = self.vq.history.get(cur.get("replay_of") or cur["id"]) if cur else None
-        if (cur and cur.get("decision") and (cur.get("replay_of") or cur["id"]) not in self.answered
-                and not (cur_row or {}).get("answer") and not (cur_row or {}).get("dismissed")):
-            calls.append(cur)
-            seen.add(cur.get("replay_of") or cur["id"])
-        for r in rows:
-            stale = newest.get(r.get("session_id") or "", 0) > r.get("ts", 0) + 1
-            if (r.get("decision") and not r.get("answer") and not r.get("dismissed") and not stale
-                    and r["id"] not in self.answered and r["id"] not in seen
-                    and now - r.get("ts", 0) < 3600 * float(self.cfg.get("calls_hours"))):
-                calls.append(r)
-                seen.add(r["id"])
+        hours = float(self.cfg.get("calls_hours"))
+        rows = self.vq.history.since(now - 3600 * hours)  # newest first
+        if cur and not any(r["id"] == (cur.get("replay_of") or cur["id"]) for r in rows) and not cur.get("replay_of"):
+            rows.insert(0, dict(cur))
+        groups: dict[str, list[dict]] = {}
+        for r in reversed(rows):  # oldest first
+            if (r.get("answer") or r.get("dismissed") or r.get("headless") or r["id"] in self.answered
+                    or not call_decisions(r)):
+                continue
+            if r.get("kind") == "approve":
+                key = "approve:" + r["id"]
+            elif r.get("kind") == "project":
+                key = "thread:" + (r.get("thread_id") or r["id"])
+            else:
+                key = "session:" + (r.get("session_id") or r["id"])
+            groups.setdefault(key, []).append(r)
+        calls = [self._group_call(g) for g in groups.values()]
         calls.sort(key=lambda r: (self._priority(r), -r.get("ts", 0)))
         return calls
+
+    @staticmethod
+    def _group_call(rows: list[dict]) -> dict:
+        """rows: one thread's open calls, oldest first -> one call (the newest row, with all of their decisions)."""
+        if len(rows) == 1 and rows[0].get("kind") in ("project", "approve"):
+            return rows[0]
+        merged: list[dict] = []
+        for r in rows:
+            for d in call_decisions(r):
+                d = {**d, "row": r["id"], "from_ts": r.get("ts", 0)}
+                k = re.sub(r"\W+", " ", d.get("question", "")).strip().lower()
+                at = next((i for i, m in enumerate(merged) if m["_k"] == k), None)
+                if at is None:
+                    merged.append({**d, "_k": k})
+                else:
+                    merged[at] = {**d, "_k": k}  # asked again: the newer wording, same place
+        if any(m.get("options") for m in merged):  # status lines ("Ready for your review") give way to real choices
+            merged = [m for m in merged if m.get("options")]
+        else:
+            merged = [m for m in merged if m["row"] == rows[-1]["id"]] or merged[-1:]
+        for m in merged:
+            m.pop("_k", None)
+            if len(rows) > 1:  # which reply each question came from
+                asked = "Asked " + time.strftime("%H:%M", time.localtime(m["from_ts"]))
+                m["context"] = asked + (": " + m["context"] if m.get("context") else "")
+        call = {**rows[-1], "id": rows[0]["id"], "replay_of": None, "group_ids": [r["id"] for r in rows],
+                "decisions": merged, "decision": merged[0] if merged else rows[-1].get("decision")}
+        return call
 
     # ---------------------------------------------------------- pins and priority
     def _active_projects(self) -> set:
@@ -2185,9 +2213,10 @@ class Widget:
         if not item:
             return
         cid = self._call_id(item)
-        self.answered.add(cid)
         self._drafts.pop(cid, None)
-        self.vq.history.update(cid, dismissed=True)
+        for i in item.get("group_ids") or [cid]:
+            self.answered.add(i)
+            self.vq.history.update(i, dismissed=True)
         self._after_call()
 
     def _after_call(self):
@@ -2236,7 +2265,7 @@ class Widget:
 
     def _reply(self, call, text):
         """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
-        if call.get("kind") == "project":  # a cloud thread: the answer goes back through the watcher
+        if call.get("kind") == "project" and len(decisions_of(call)) <= 1:  # a cloud thread: back through the watcher
             if text and text != SKIPPED:
                 try:
                     sent = self.vq.answer_push(call, text)
@@ -2275,6 +2304,23 @@ class Widget:
         self._layout_key = None
         self._tick_once()
         self._step_motion(-1 if back else 1)
+
+    def _answer_pushes(self, call, answers):
+        """Each pushed call in the group gets its own answer (the watcher sends one ANSWER per id)."""
+        decs, sent = decisions_of(call), 0
+        for dec, ans in zip(decs, answers):
+            row = self.vq.history.get(dec.get("row") or call["id"])
+            if not row or not ans or ans == SKIPPED:
+                continue
+            try:
+                if self.vq.answer_push(row, ans):
+                    sent += 1
+                    self.answered.add(row["id"])
+            except Exception as e:
+                self.api.log(f"answer push: {e!r}")
+        self._toast(f"Sent {sent} answer{'s' if sent != 1 else ''} to {call.get('thread') or call.get('project')}"
+                    if sent else "Nothing sent")
+        self._after_call()
 
     def _send_all(self, call):
         decs, d = self._draft(call)
@@ -2380,7 +2426,7 @@ class Widget:
         """What the question is about: a one-line hint that opens to the context, any pictures or previews
         the reply points at, and the full reply, so there's no need to open the session first."""
         c, p, Wp = self.c, self.p, self.Wp
-        row = self.vq.history.get(self._call_id(call)) or {}
+        row = self.vq.history.get(dec.get("row") or self._call_id(call)) or {}
         ctx = (dec.get("context") or "").strip()
         vis = call.get("visuals") or row.get("visuals") or []
         msg = row.get("message") or call.get("message") or ""
@@ -2598,10 +2644,14 @@ class Widget:
 
     def _answer(self, item, text, answers=None):
         cid = self._call_id(item)
-        self.answered.add(cid)
         self._drafts.pop(cid, None)
-        self.vq.history.update(cid, answer=text, answered_at=time.time(),
-                               **({"answers": answers} if answers else {}))
+        if item.get("kind") == "project":  # a cloud thread's group: one answer back per pushed call
+            self._answer_pushes(item, answers or [text])
+            return
+        for i in item.get("group_ids") or [cid]:  # the whole group closes: one message answered all of it
+            self.answered.add(i)
+            self.vq.history.update(i, answer=text, answered_at=time.time(),
+                                   **({"answers": answers} if answers else {}))
         mode = self.cfg.get("desktop_answers")
         app_id = getattr(self.api, "desktop_app_id", None)
         if mode in ("send", "paste") and app_id and app_id(item):
@@ -2636,9 +2686,9 @@ class Widget:
             self._toast(self.api.desktop_result.get(code, "Answer copied"))
             if code in (3, 4, 5):  # not delivered: keep the answer on the clipboard and the call open
                 self._copy(text)
-                cid = self._call_id(item)
-                self.answered.discard(cid)
-                self.vq.history.update(cid, answer=None, answered_at=None, answers=None)
+                for i in item.get("group_ids") or [self._call_id(item)]:
+                    self.answered.discard(i)
+                    self.vq.history.update(i, answer=None, answered_at=None, answers=None)
                 self._layout_key = None
 
     # ---------------------------------------------------------- open, copy, replay, toast

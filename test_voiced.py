@@ -329,6 +329,21 @@ class OpenSessionTests(unittest.TestCase):
         self.assertEqual(voiced.project_link("x", "chan_abcdef123", "bad id&x=1"), "claude://code/project/chan_abcdef123")
 
 
+class DecisionsBlockTests(unittest.TestCase):
+    def test_parse_decisions_block(self):
+        t = ("Inbox monitor found one message.\n\n**Decisions**\n\n1. **Grid footer total**\n"
+             "   - A. Build it now as a portal PR. (Recommended)\n   - B. Wait for Gareth's email.\n"
+             "2. \"Spans months\" flag\n   - A. Drop it from the roadmap.\n   - B. Keep it.\n")
+        d = voiced.parse_decisions(t)
+        self.assertEqual([x["question"] for x in d], ["Grid footer total", '"Spans months" flag'])
+        self.assertEqual(d[0]["options"], ["A. Build it now as a portal PR.", "B. Wait for Gareth's email."])
+        self.assertEqual((d[0]["recommended"], d[1]["recommended"]), (0, None))
+        self.assertEqual(voiced.parse_decisions("No questions here. 1. a list\n2. b"), [])
+        row = {"message": t, "decision": {"question": "summary", "options": []}}
+        self.assertEqual(len(voiced.call_decisions(row)), 2)                    # the block beats the summary
+        self.assertEqual(voiced.call_decisions({"message": "x", "decision": {"question": "q", "options": []}})[0]["question"], "q")
+
+
 class AnswerPathTests(unittest.TestCase):
     def test_answer_queue_long_poll_and_ack(self):
         path = Path(tempfile.mkdtemp()) / "h.jsonl"

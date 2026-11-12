@@ -253,6 +253,69 @@ class ThemeTests(unittest.TestCase):
             w.vq.ack_answer("pc-click")
             w.vq.push_done("pc-click")
 
+    def test_thread_decisions_group_and_append(self):
+        """Several replies from one thread, each with a Decisions block: one call, oldest first, a re-ask in
+        place, status lines dropped, a new reply appended; answering closes every row in the group."""
+        w, now = self.w, time.time()
+        blk = "Done.\n\n**Decisions**\n"
+        rows = [
+            {"id": "g1", "ts": now - 300, "message": blk + "1. **AP-009**\n   - A. Open the PDF first. (Recommended)\n"
+             "   - B. Raise it on the call.\n2. **Aerotek date in GP**\n   - A. Tell them later. (Recommended)\n"
+             "   - B. Tell them now."},
+            {"id": "g2", "ts": now - 200, "message": "Inbox monitor: nothing new.",
+             "decision": {"question": "Ready for your review: inbox monitor polling", "options": []}},
+            {"id": "g3", "ts": now - 100, "message": blk + "1. **Multi-month flag rule**\n   - A. Tell me the rule. "
+             "(Recommended)\n   - B. Wait for a follow-up.\n2. AP-009\n   - A. Open the PDF and prepare a fix PR.\n"
+             "   - B. Raise it on the call."},
+        ]
+        for r in rows:
+            w.vq.history.add({**r, "cwd": "C:/x/acct", "project": "acct", "session_id": "s-grp",
+                              "entrypoint": "claude-desktop", "status": "spoken", "text": "x"})
+        try:
+            calls = [c for c in w._collect_calls_raw(None) if c.get("session_id") == "s-grp"]
+            self.assertEqual(len(calls), 1)
+            c = calls[0]
+            self.assertEqual(c["id"], "g1")                                    # stable while replies join
+            self.assertEqual([d["question"] for d in c["decisions"]],
+                             ["AP-009", "Aerotek date in GP", "Multi-month flag rule"])
+            self.assertEqual(c["decisions"][0]["options"][0], "A. Open the PDF and prepare a fix PR.")  # newer wording
+            self.assertEqual(c["decisions"][1]["recommended"], 0)
+            self.assertTrue(c["decisions"][2]["context"].startswith("Asked "))
+            w.vq.history.add({"id": "g4", "ts": now - 10, "cwd": "C:/x/acct", "project": "acct", "session_id": "s-grp",
+                              "entrypoint": "claude-desktop", "status": "spoken", "text": "x",
+                              "message": blk + "1. Grid footer total\n   - A. Build it now. (Recommended)\n   - B. Wait."})
+            c = [c for c in w._collect_calls_raw(None) if c.get("session_id") == "s-grp"][0]
+            self.assertEqual(c["id"], "g1")
+            self.assertEqual(c["decisions"][-1]["question"], "Grid footer total")  # appended at the end
+            w._answer(c, "1A, 2A, 3A, 4A")
+            for i in ("g1", "g2", "g3", "g4"):
+                self.assertEqual(w.vq.history.get(i)["answer"], "1A, 2A, 3A, 4A")
+            self.assertFalse([c for c in w._collect_calls_raw(None) if c.get("session_id") == "s-grp"])
+        finally:
+            for i in ("g1", "g2", "g3", "g4"):
+                w.vq.history.update(i, dismissed=True)
+
+    def test_cloud_pushes_from_one_thread_group(self):
+        w = self.w
+        a = w.vq.push_call("cg-1", "HomeLab", "Councils", "Install the job?", ["install it", "not yet"],
+                           project_id="chan_abcdef123", thread_id="cmsg_threadroot01")
+        b = w.vq.push_call("cg-2", "HomeLab", "Councils", "Use my email?", ["use my email", "not yet"],
+                           project_id="chan_abcdef123", thread_id="cmsg_threadroot01")
+        try:
+            calls = [c for c in w._collect_calls_raw(None) if c.get("thread_id") == "cmsg_threadroot01"]
+            self.assertEqual(len(calls), 1)
+            self.assertEqual([d["question"] for d in calls[0]["decisions"]], ["Install the job?", "Use my email?"])
+            w._answer(calls[0], "x", answers=["install it", "not yet"])
+            got = {}
+            for _ in range(2):
+                x = w.vq.next_answer(0)
+                got[x["id"]] = x["answer"]
+                w.vq.ack_answer(x["id"])
+            self.assertEqual(got, {"cg-1": "install it", "cg-2": "not yet"})  # one answer per pushed call
+        finally:
+            for cid in ("cg-1", "cg-2"):
+                w.vq.push_done(cid)
+
     def test_bundled_fonts_present_and_fallback(self):
         fonts = Path(player.__file__).with_name("fonts")
         for stem in ("VQInter", "VQInterMedium", "VQInterSemibold", "VQInterBold", "VQSpaceGroteskMedium",
