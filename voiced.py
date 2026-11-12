@@ -62,6 +62,7 @@ SETTINGS_SCHEMA = {
     "summaries": (bool, True),
     "say_source": (bool, True),
     "speak_background": (bool, False),
+    "speak_remote_sessions": (bool, False),
     "auto_open_calls": (bool, True),
     "hide_when_idle": (bool, False),
     "calls_hours": ([6, 12, 24, 72, 168], 72),
@@ -574,6 +575,12 @@ class VoiceQueue:
                 item["text"] = "Finished with technical output. The details are in the session."
         if not silent and src["headless"] and not (self.speak_headless or self.settings.get("speak_background")):
             silent = "headless run"
+        if not silent and not self.settings.get("speak_remote_sessions"):
+            try:
+                if remote_spawned(session_id):
+                    silent = "remote session"  # logged, not spoken, no call (not in QUIET_CALLS)
+            except Exception as e:
+                log(f"remote check: {e!r}")
         if not silent and self.muted:
             silent = "muted"
         if not silent and self.quiet.get(src.get("project", ""), 0) > time.time():
@@ -676,6 +683,8 @@ class VoiceQueue:
         so the call's one action opens the session. One call per session: a newer prompt replaces it."""
         if not session_id:
             return None
+        if not self.settings.get("speak_remote_sessions") and remote_spawned(session_id):
+            return None  # a project's session: its thread relays the prompt
         src = source_of(cwd, entrypoint)
         if src["headless"] or src["project"] in ("pytest run", "temp folder"):
             return None
@@ -738,6 +747,15 @@ class VoiceQueue:
                 hit = True
         return hit
 
+    def _close_remote(self, rows: list[dict]) -> None:
+        """Open calls from sessions a project started close: the project thread relays what needs Yury."""
+        for r in rows:
+            sid = r.get("session_id") or ""
+            if (decisions_of(r) and not r.get("answer") and not r.get("dismissed") and not sid.startswith("cloud:")
+                    and remote_spawned(sid)):
+                self.history.update(r["id"], dismissed=True)
+                log(f"call {r['id']} ({r.get('project')}) closed: from a project session")
+
     def _close_moved_on(self, rows: list[dict], hours: float) -> None:
         """A found call (open question, needed action, permission prompt) closes once its session writes
         anything newer: the question was answered there, or the agent carried on."""
@@ -768,7 +786,10 @@ class VoiceQueue:
                         if r.get("ts", 0) >= last.get(r["session_id"], {}).get("ts", -1):
                             last[r["session_id"]] = r
                 self._close_moved_on(rows, hours)
-                found = waiting_sessions(root, hours)
+                if not self.settings.get("speak_remote_sessions"):
+                    self._close_remote(rows)
+                found = waiting_sessions(root, hours,
+                                         include_remote=bool(self.settings.get("speak_remote_sessions")))
                 if cli_root is not False:
                     found += waiting_cli_sessions(cli_root, hours, skip=desktop_cli_ids(root))
                 for w in found:
@@ -1258,7 +1279,31 @@ def pending_question(path: Path | None, tail: int = 262144) -> tuple[str, list[d
     return "", []
 
 
-def waiting_sessions(root: Path | None = None, hours: float = 72, quiet_for: float = 60) -> list[dict]:
+_REMOTE: dict[str, tuple[float, bool]] = {}  # cli session id -> (checked at, spawned remotely)
+
+
+def remote_spawned(session_id: str, root: Path | None = None, ttl: float = 300) -> bool:
+    """A Claude app session started remotely (Remote Control, e.g. "Local session (from a project)"): its
+    session file has `remoteControlSpawn`. Its owner talks to it through the project thread, which relays
+    anything that needs Yury, so its questions here would be duplicates."""
+    if not session_id:
+        return False
+    hit = _REMOTE.get(session_id)
+    if hit and time.time() - hit[0] < ttl and root is None:
+        return hit[1]
+    f, out = _desktop_files(root).get(session_id), False
+    if f:
+        try:
+            out = bool(json.loads(f.read_text(encoding="utf-8")).get("remoteControlSpawn"))
+        except (OSError, ValueError):
+            out = False
+    if root is None:
+        _REMOTE[session_id] = (time.time(), out)
+    return out
+
+
+def waiting_sessions(root: Path | None = None, hours: float = 72, quiet_for: float = 60,
+                     include_remote: bool = False) -> list[dict]:
     """Desktop Code sessions that wait on Yury now: an open AskUserQuestion, or the app's own turn summary says
     he must act. One entry per session (its newest question), with a key that changes when the session moves on."""
     root = root or (Path(os.environ.get("APPDATA", "")) / "Claude" / "claude-code-sessions")
@@ -1279,6 +1324,8 @@ def waiting_sessions(root: Path | None = None, hours: float = 72, quiet_for: flo
         at = float(d.get("lastActivityAt") or 0) / 1000
         if not sid or d.get("isArchived") or now - at > hours * 3600:
             continue
+        if d.get("remoteControlSpawn") and not include_remote:
+            continue  # a session a project started: the project thread relays what needs Yury
         src = source_of(cwd)
         if src["project"] in ("pytest run", "temp folder") or cwd.replace("/", "\\").lower().startswith(own):
             continue

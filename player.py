@@ -803,7 +803,7 @@ class MemSettings:
     def __init__(self):
         self.version = 0
         self._v = {"text_size": 1.0, "opacity": 1.0, "voice": "af_heart", "speed": 1.0, "summaries": True,
-                   "say_source": True, "speak_background": False, "auto_open_calls": True,
+                   "say_source": True, "speak_background": False, "speak_remote_sessions": False, "auto_open_calls": True,
                    "hide_when_idle": False, "calls_hours": 72, "desktop_answers": "send",
                    "pulse_with_voice": True, "rim_color": "#F59E0B", "glow_size": 12,
                    "player_width": 1.0, "theme": "ember", "minimized": False, "reduce_motion": False,
@@ -3283,6 +3283,8 @@ class Widget:
         y = toggle("say_source", "Say which project first", "\u201cFrom agentic os v2.\u201d before each reply", y)
         y = toggle("summaries", "Summarize replies", "Off: read a cleaned-up excerpt instead", y)
         y = toggle("speak_background", "Speak background runs", "Batch and headless runs (always in history)", y)
+        y = toggle("speak_remote_sessions", "Speak project sessions",
+                   "Sessions a Claude project starts here; the project relays their calls", y)
         y += p(14)
 
         # behavior

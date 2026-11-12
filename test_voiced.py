@@ -253,6 +253,40 @@ class PushTests(unittest.TestCase):
             vq.stop()
 
 
+class RemoteSessionTests(unittest.TestCase):
+    def test_project_sessions_make_no_calls(self):
+        root = Path(tempfile.mkdtemp())
+        d = root / "a" / "b"
+        d.mkdir(parents=True)
+        base = {"cwd": "C:/x/proj", "lastActivityAt": time.time() * 1000 - 120000, "isArchived": False}
+        (d / "local_1.json").write_text(json.dumps({"cliSessionId": "11111111-2222-3333-4444-555555555555", **base,
+                                                    "remoteControlSpawn": {"ccrSessionId": "cse_x"}}))
+        (d / "local_2.json").write_text(json.dumps({"cliSessionId": "66666666-7777-8888-9999-000000000000", **base}))
+        self.assertTrue(voiced.remote_spawned("11111111-2222-3333-4444-555555555555", root))
+        self.assertFalse(voiced.remote_spawned("66666666-7777-8888-9999-000000000000", root))
+        self.assertFalse(voiced.remote_spawned("", root))
+        old = voiced.remote_spawned
+        voiced.remote_spawned = lambda sid, root=None, ttl=300: sid.startswith("1111")
+        try:
+            st = voiced.Settings()
+            st.update(summaries=False)
+            vq = voiced.VoiceQueue(voiced.History(Path(tempfile.mkdtemp()) / "h.jsonl"), fake_synth, FakePlayer,
+                                   settings=st)
+            self.assertEqual(vq.say("Should I?", "C:/x/proj", "11111111-2222-3333-4444-555555555555")["status"], "not spoken: remote session")
+            self.assertIsNone(vq.add_waiting("11111111-2222-3333-4444-555555555555", "C:/x/proj", "Claude needs your permission"))
+            self.assertEqual(vq.say("Done.", "C:/x/proj", "66666666-7777-8888-9999-000000000000")["status"], "queued")
+            old_call = {"id": "oc1", "ts": time.time(), "session_id": "11111111-2222-3333-4444-555555555555",
+                        "project": "p", "decision": {"question": "Q?", "options": []}}
+            vq.history.add(old_call)
+            vq._close_remote(vq.history.recent(10))
+            self.assertTrue(vq.history.get("oc1")["dismissed"])           # stale project-session calls close
+            st.update(speak_remote_sessions=True)                        # the setting brings them back
+            self.assertEqual(vq.say("Again?", "C:/x/proj", "11111111-2222-3333-4444-555555555555")["status"], "queued")
+            vq.stop()
+        finally:
+            voiced.remote_spawned = old
+
+
 class WatchAnswersTests(unittest.TestCase):
     def test_multi_question_call_answered_in_thread_closes(self):
         import datetime as dt
