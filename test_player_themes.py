@@ -132,8 +132,9 @@ class ThemeTests(unittest.TestCase):
         w = self.w
         w._set_mode("cap")
         self.pump(0.1)
-        ev = SimpleNamespace(x_root=100, y_root=100, x=5, y=5)
+        ev = SimpleNamespace(x_root=100, y_root=100, x=5, y=5, time=1000)
         w.c.configure(cursor="")
+        w._presses = [(900, True)]                                   # the first click was on bare background
         w._drag_start(ev)
         w._double(ev)
         self.assertEqual(w.mode, "panel")
@@ -146,6 +147,10 @@ class ThemeTests(unittest.TestCase):
         w._double(ev)
         self.assertEqual(w.mode, "panel")
         w.c.configure(cursor="")
+        w._presses = [(900, False)]                                  # first click on a nav arrow: a near miss
+        w._double(ev)
+        self.assertEqual(w.mode, "panel")
+        w._presses = [(900, True)]
         w._double(ev)
         self.assertEqual(w.mode, "cap")
         self.assertIn("_double", w.c.tag_bind("bg", "<Double-Button-1>"))
@@ -197,7 +202,7 @@ class ThemeTests(unittest.TestCase):
             w._layout_key = None
             w._tick_once(force=True)
             self.pump(0.2)
-            self.assertIn("· demo · Design", w.c.itemcget(w.call_from, "text"))
+            self.assertTrue(w.c.itemcget(w.call_from, "text").startswith("demo · Design"))  # its own line
             player.thread_title = lambda sid, cwd="": "demo"                  # same as the project: hidden
             self.assertEqual(w._where({"project": "demo", "session_id": "s"}), ("demo",))
         finally:
@@ -252,6 +257,71 @@ class ThemeTests(unittest.TestCase):
         finally:
             w.vq.ack_answer("pc-click")
             w.vq.push_done("pc-click")
+
+    def test_call_nav_never_moves_and_is_a_big_target(self):
+        """The arrows sit in fixed slots: the same place at 1/11 and 10/11, at least 28 px, any name length."""
+        w, now = self.w, time.time()
+        ids = [f"nav{n}" for n in range(11)]
+        for n, i in enumerate(ids):
+            w.vq.history.add({"id": i, "ts": now - 30 - n, "cwd": f"C:/x/p{n}", "project": f"p{n}" * (1 + n % 4),
+                              "session_id": f"s-nav{n}", "entrypoint": "claude-desktop", "status": "spoken",
+                              "text": "x", "decision": {"question": "Pick?", "options": ["a", "b"]}})
+        try:
+            w._set_mode("panel")
+            seen = set()
+            for ix in (0, 1, 9):
+                w._call_ix = ix
+                w._layout_key = None
+                w._tick_once(force=True)
+                self.pump(0.1)
+                bp, bn = w.c.bbox(w._nav_bg["callprev"]), w.c.bbox(w._nav_bg["callnext"])
+                self.assertGreaterEqual(bp[2] - bp[0], w.p(28) - 1)
+                self.assertGreaterEqual(bn[3] - bn[1], w.p(28) - 1)
+                seen.add((tuple(w.c.coords(w.call_prev)), tuple(w.c.coords(w.call_next))))
+            self.assertEqual(len(seen), 1)
+            band = w._call_band
+            self.assertFalse(w._bare((band[0] + band[1]) / 2, ""))             # the call header never collapses
+        finally:
+            for i in ids:
+                w.vq.history.update(i, dismissed=True)
+
+    def test_middle_ellipsis_keeps_both_ends(self):
+        f = self.w.F["mono"]
+        t = "Client Portal Rebuild · Reconcile the vendor invoice grid footer totals across currencies"
+        out = self.w._ellipsize_mid(t, f, f.measure(t) // 2)
+        self.assertIn("…", out)
+        self.assertTrue(out.startswith("Client"))
+        self.assertTrue(out.endswith("currencies"))
+        self.assertLessEqual(f.measure(out), f.measure(t) // 2)
+        self.assertEqual(self.w._ellipsize_mid("short", f, 500), "short")
+
+    def test_new_call_does_not_switch_away_mid_answer(self):
+        """While he works through a call, a new one stays behind a NEW chip; sending or 60 s idle lets it in."""
+        w, now = self.w, time.time()
+        w._set_mode("panel")
+        w._layout_key = None
+        w._tick_once(force=True)
+        self.pump(0.1)
+        mine = w._call_id(w._call())
+        w._touch()
+        w.vq.history.add({"id": "hold-new", "ts": now, "cwd": "C:/x/other", "project": "other-proj",
+                          "session_id": "s-hold", "entrypoint": "claude-desktop", "status": "spoken", "text": "x",
+                          "decision": {"question": "New?", "options": ["a", "b"]}})
+        try:
+            w._tick_once(force=True)
+            self.pump(0.1)
+            self.assertEqual(w._call_id(w._call()), mine)                     # still on his call
+            self.assertEqual(w._held_label(), "other-proj")
+            self.assertEqual(w.c.itemcget(w.call_new, "state"), "normal")
+            self.assertIn("other-proj", w.c.itemcget(w.call_new, "text"))
+            w._touch_at = time.time() - w.HOLD_S - 1                          # idle: the hold runs out
+            w._tick_once(force=True)
+            self.pump(0.1)
+            self.assertEqual(w._call_id(w._call()), "hold-new")
+            self.assertEqual(w.c.itemcget(w.call_new, "state"), "hidden")
+        finally:
+            w.vq.history.update("hold-new", dismissed=True)
+            w._release()
 
     def test_thread_decisions_group_and_append(self):
         """Several replies from one thread, each with a Decisions block: one call, oldest first, a re-ask in

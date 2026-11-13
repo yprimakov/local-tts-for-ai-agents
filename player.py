@@ -89,7 +89,7 @@ EDGE_HOT = "#8a5410"  # rim colour at the top of a breath
 
 W = 384           # logical px
 CAP_H = 64
-PAD = 18
+PAD = 22
 R_PANEL = 22
 ORB = 46
 LIST_MAX = 300
@@ -891,6 +891,8 @@ class Widget:
         self._typed: list[tuple] = []        # results from typing answers into the Claude app (worker thread)
         self._thumbs: dict = {}              # thumbnails for call context, by (path, w, h)
         self._call_ix = 0
+        self._touch_at = 0.0        # last time he worked on the call on screen (hold: no switching away)
+        self._held_new = None       # call id that came in during a hold
         self._auto_open = None      # call id that opened the panel by itself
         self._calls: list[dict] = []
         self._cur = None
@@ -1094,6 +1096,23 @@ class Widget:
             cut = cut[:b]
         return cut.rstrip(" ·:,;-_/") + "…"
 
+    @staticmethod
+    def _ellipsize_mid(text: str, font, maxw: int) -> str:
+        """Cut in the middle, so both the project and the end of the thread name stay readable."""
+        text = " ".join((text or "").split())
+        if font.measure(text) <= maxw:
+            return text
+        lo, hi = 0, len(text)
+        while lo < hi:
+            k = (lo + hi + 1) // 2
+            a = (k + 1) // 2
+            if font.measure(text[:a].rstrip() + "…" + text[len(text) - (k - a):].lstrip()) <= maxw:
+                lo = k
+            else:
+                hi = k - 1
+        a = (lo + 1) // 2
+        return text[:a].rstrip() + "…" + text[len(text) - (lo - a):].lstrip()
+
     def _fit(self, opts, font, maxw: int) -> str:
         """The first of several phrasings that fits, else the last one cut at a word."""
         opts = opts if isinstance(opts, tuple) else (opts,)
@@ -1244,6 +1263,8 @@ class Widget:
         self._set_off, self._set_max, self._set_bar_on, self._bar_job = 0, 0, False, None
         c.bind("<MouseWheel>", self._on_wheel, add="+")
         c.bind("<ButtonPress-1>", self._press_fx, add="+")
+        c.bind("<ButtonPress-1>", self._note_press, add="+")
+        self._presses: list[tuple] = []
         c.bind("<ButtonRelease-1>", self._release_fx, add="+")
         Wp = self.Wp
 
@@ -1300,11 +1321,11 @@ class Widget:
             self.btn[name] = self._icon_button(name, glyph, cmd, tip)
 
         # ---- panel
-        self.pan_name = c.create_text(p(78), p(31), anchor="w", text="", font=self.F["title"], fill=FG,
+        self.pan_name = c.create_text(p(PAD + ORB + 14), p(31), anchor="w", text="", font=self.F["title"], fill=FG,
                                       tags=("pan", "panname"))
         self.pan_arrow = c.create_text(0, p(31), anchor="w", text="↗", font=self.F["name"], fill=EMBER,
                                        tags=("pan", "panname"))
-        self.pan_meta = c.create_text(p(78), p(53), anchor="w", text="", font=self.F["meta"], fill=MUTED,
+        self.pan_meta = c.create_text(p(PAD + ORB + 14), p(53), anchor="w", text="", font=self.F["meta"], fill=MUTED,
                                       tags=("pan", "drag"))
         c.tag_bind("panname", "<Button-1>", lambda e: self._open(self._shown or self._call()))
         c.tag_bind("panname", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.pan_name, EMBER)))
@@ -1349,7 +1370,7 @@ class Widget:
         c.tag_bind("callfrom", "<Button-1>", lambda e: self._open(self._call()))
         c.tag_bind("callfrom", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.call_from, FG)))
         c.tag_bind("callfrom", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.call_from, MUTED)))
-        self._tipify("callfrom", lambda: "Open this session")
+        self._tipify("callfrom", lambda: f"{' · '.join(x for x in ((self._call() or {}).get('project'), self._thread(self._call())) if x)}\nClick to open this session")
         self.call_pin = c.create_text(0, 0, anchor="w", text="☆", font=self.F["mono"], fill=FAINT,
                                       tags=("pan", "ask", "callpin"))
         c.tag_bind("callpin", "<Button-1>", lambda e: self._toggle_pin(self._call()))
@@ -1362,15 +1383,28 @@ class Widget:
             self._pinned_state(self._call()), "Pin this project (Shift+click: this thread only)"))
         self.call_act = c.create_text(0, 0, anchor="w", text="●", font=self.F["mono_s"], fill=EMBER,
                                       state="hidden", tags=("pan", "ask"))
-        self.call_nav = c.create_text(0, 0, anchor="e", text="", font=self.F["mono"], fill=FAINT, tags=("pan", "ask"))
-        self.call_prev = c.create_text(0, 0, anchor="e", text=self.glyph("left"), font=self.F["icon_s"], fill=MUTED,
-                                       tags=("pan", "ask", "callprev"))
-        self.call_next = c.create_text(0, 0, anchor="e", text=self.glyph("right"), font=self.F["icon_s"], fill=MUTED,
-                                       tags=("pan", "ask", "callnext"))
-        for tag, d in (("callprev", -1), ("callnext", 1)):
-            c.tag_bind(tag, "<Button-1>", lambda e, d=d: self._step_call(d))
-            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
-            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+        self.call_nav = c.create_text(0, 0, anchor="center", text="", font=self.F["mono"], fill=FAINT,
+                                      tags=("pan", "ask"))
+        self._nav_bg = {}
+        for tag, d, glyph, tip in (("callprev", -1, "left", "Previous call"), ("callnext", 1, "right", "Next call")):
+            bg = c.create_image(0, 0, image=self.art.circle(28, outline=(*INK, 36)), tags=("pan", "ask", tag))
+            self._nav_bg[tag] = bg
+            setattr(self, "call_prev" if d < 0 else "call_next",
+                    c.create_text(0, 0, anchor="center", text=self.glyph(glyph), font=self.F["icon_s"], fill=MUTED,
+                                  tags=("pan", "ask", tag)))
+            c.tag_bind(tag, "<Button-1>", lambda e, d=d: (self._touch(), self._step_call(d)))
+            c.tag_bind(tag, "<Double-Button-1>", lambda e, d=d: (self._touch(), self._step_call(d), "break")[2])
+            c.tag_bind(tag, "<Enter>", lambda e, bg=bg: (c.configure(cursor="hand2"), c.itemconfigure(
+                bg, image=self.art.circle(28, fill=(*INK, 16), outline=(*INK, 60)))))
+            c.tag_bind(tag, "<Leave>", lambda e, bg=bg: (c.configure(cursor=""), c.itemconfigure(
+                bg, image=self.art.circle(28, outline=(*INK, 36)))))
+            self._tipify(tag, lambda tip=tip: tip)
+        self.call_new = c.create_text(0, 0, anchor="w", text="", font=self.F["mono_s"], fill=EMBER,
+                                      state="hidden", tags=("pan", "ask", "callnew"))
+        c.tag_bind("callnew", "<Button-1>", lambda e: self._jump_new())
+        c.tag_bind("callnew", "<Enter>", lambda e: (c.configure(cursor="hand2"), self._tint(self.call_new, FG)))
+        c.tag_bind("callnew", "<Leave>", lambda e: (c.configure(cursor=""), self._tint(self.call_new, EMBER)))
+        self._tipify("callnew", lambda: "Something new came in while you answer. Click to go there")
         self.call_dismiss = c.create_text(0, 0, anchor="e", text="Dismiss", font=self.F["mono"], fill=FAINT,
                                           tags=("pan", "ask", "dismiss"))
         c.tag_bind("dismiss", "<Button-1>", lambda e: self._dismiss())
@@ -1394,6 +1428,7 @@ class Widget:
         self.entry.bind("<FocusIn>", self._entry_focus)
         self.entry.bind("<FocusOut>", self._entry_blur)
         self.entry.bind("<Return>", lambda e: self._send_typed())
+        self.entry.bind("<Key>", lambda e: self._touch(), add="+")
         self.entry.bind("<Escape>", lambda e: (self.root.focus_set(), "break")[1])
         self.send_bg = c.create_image(0, 0, image=self.art.circle(32, fill=Art._rgba(ACC[0])), tags=("pan", "ask", "send"))
         self.send_g = c.create_text(0, 0, text=self.glyph("send"), font=self.F["icon_s"], fill=ACC_INK,
@@ -1515,10 +1550,21 @@ class Widget:
         self._dx, self._dy = e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y()
         self._press_at, self._dragged = (e.x_root, e.y_root), False
 
+    def _bare(self, y, cursor) -> bool:
+        """A click on empty background: not a control, not the call header row."""
+        band = getattr(self, "_call_band", None) if self.mode == "panel" else None
+        return cursor != "hand2" and not (band and band[0] <= y <= band[1])
+
+    def _note_press(self, e):
+        self._presses = self._presses[-3:] + [(e.time, self._bare(e.y, self.c.cget("cursor")))]
+
     def _double(self, e):
-        """Double-click on empty background opens or collapses the player. Not on controls (hand cursor),
-        and not when the first click turned into a drag."""
-        if getattr(self, "_dragged", False) or self.c.cget("cursor") == "hand2" or self.view == "settings":
+        """Double-click on empty background opens or collapses the player. Both clicks must land on bare
+        background (a fast click on a nav arrow then a near miss must not collapse it), and not after a drag."""
+        if getattr(self, "_dragged", False) or self.view == "settings" or not self._bare(e.y, self.c.cget("cursor")):
+            return
+        first = [b for t, b in self._presses if t < e.time]
+        if not first or not first[-1]:
             return
         self._toggle_mode()
 
@@ -1966,6 +2012,10 @@ class Widget:
             self._place_buttons()
             self._tick_once(force=True)
 
+    def _head_w(self):
+        """Panel header text width: from after the orb to a gap before the five buttons."""
+        return self.Wp - self.p(PAD + ORB + 14) - self.p(PAD + 11 + 4 * 32 + 15 + 14)
+
     def _place_buttons(self):
         p, Wp, c = self.p, self.Wp, self.c
         y = p(CAP_H / 2) if self.mode == "cap" else p(PAD + ORB / 2)
@@ -1976,7 +2026,8 @@ class Widget:
         for name in ("close", "size", "mini", "mute", "gear"):
             b = self.btn[name]
             if name in names:
-                x = Wp - p(12 if self.mode == "cap" else 10) - p(15) - names.index(name) * p(31)
+                x = (Wp - p(12) - p(15) - names.index(name) * p(31) if self.mode == "cap" else
+                     Wp - p(PAD) - p(11) - names.index(name) * p(32))
                 c.coords(b["bg"], x, y)
                 c.coords(b["g"], x, y)
                 c.itemconfigure(b["g"], state="normal")
@@ -2186,6 +2237,39 @@ class Widget:
         self._layout_key = None
         self._tick_once(force=True)
 
+    HOLD_S = 60
+
+    def _touch(self):
+        self._touch_at = time.time()
+
+    def _engaged(self) -> bool:
+        """He is working through the call on screen: something new must not switch the panel away."""
+        return self.mode == "panel" and bool(self._calls) and time.time() - self._touch_at < self.HOLD_S
+
+    def _release(self):
+        self._touch_at = 0.0
+
+    def _held_label(self) -> str:
+        """Project of whatever came in during a hold (a new call, or another session speaking)."""
+        if not self._engaged():
+            return ""
+        ids = [self._call_id(i) for i in self._calls]
+        if self._held_new in ids:
+            return self._calls[ids.index(self._held_new)].get("project") or "?"
+        cur, call = self._cur, self._call()
+        if cur and call and cur.get("session_id") != call.get("session_id"):
+            return cur.get("project") or "?"
+        return ""
+
+    def _jump_new(self):
+        ids = [self._call_id(i) for i in self._calls]
+        held, self._held_new = self._held_new, None
+        self._release()
+        if held in ids:
+            self._call_ix = ids.index(held)
+        self._layout_key = None
+        self._tick_once(force=True)
+
     def _call(self):
         if not self._calls:
             return None
@@ -2220,6 +2304,7 @@ class Widget:
         self._after_call()
 
     def _after_call(self):
+        self._release()
         self._layout_key = None
         self._tick_once()
         if not self._calls and self._auto_open:
@@ -2265,6 +2350,7 @@ class Widget:
 
     def _reply(self, call, text):
         """Record one answer (None = skip). One question sends at once; several wait for Send answers."""
+        self._touch()
         if call.get("kind") == "project" and len(decisions_of(call)) <= 1:  # a cloud thread: back through the watcher
             if text and text != SKIPPED:
                 try:
@@ -2274,6 +2360,7 @@ class Widget:
                     sent = None
                 if sent:
                     call["sent_answer"] = text
+                    self._release()
                     self._layout_key = None
                     self._toast(f"Sent to {call.get('thread') or call.get('project')}: {text}")
                     self._tick_once(force=True)
@@ -2298,6 +2385,7 @@ class Widget:
         self._step_motion(1 if d["ix"] > i else -1)
 
     def _goto_question(self, call, i):
+        self._touch()
         _, d = self._draft(call)
         back = i < d["ix"]
         d["ix"] = i
@@ -2381,6 +2469,7 @@ class Widget:
         return y + p(18)
 
     def _ctx_toggle(self, call, key):
+        self._touch()
         _, d = self._draft(call)
         d[key] = not d.get(key, False)
         if key == "ctx" and not d["ctx"]:
@@ -2626,6 +2715,7 @@ class Widget:
         return "break"
 
     def _entry_focus(self, _e):
+        self._touch()
         if self.entry.get() == self._hint:
             self.entry.delete(0, "end")
         self.entry.configure(fg=FG)
@@ -2715,7 +2805,7 @@ class Widget:
         self._toast_until = time.time() + 2.6
         self._text(self.cap_line, self._ellipsize(text, self.F["line"], self._cap_line_w()))
         self._fill(self.cap_line, EMBER)
-        self._text(self.pan_meta, self._ellipsize(text, self.F["meta"], self.Wp - self.p(78) - self.p(138)))
+        self._text(self.pan_meta, self._ellipsize(text, self.F["meta"], self._head_w()))
         self._fill(self.pan_meta, EMBER)
         for item in (self.cap_line, self.pan_meta):
             self._glide(item, 0, self.p(5), dur=0.2)
@@ -2795,7 +2885,9 @@ class Widget:
             if was in new_ids:
                 self._call_ix = new_ids.index(was)  # a re-order (pin) keeps the call you are looking at
             self._calls = calls
-            if fresh and not first:
+            if fresh and not first and self._engaged() and was in new_ids:
+                self._held_new = fresh[0]  # he is mid-answer: keep his call, show a NEW chip instead
+            elif fresh and not first:
                 self._call_ix = new_ids.index(fresh[0])
                 if not self._visible and self.hidden_for_next is not None:
                     self.show()  # a decision is waiting: come back even if hidden until the next voiceover
@@ -2807,6 +2899,12 @@ class Widget:
             self._layout_key = None
         else:
             self._calls = calls
+        if self._held_new and not self._engaged():  # the hold ran out (idle 60 s): go to what came in
+            ids = [self._call_id(i) for i in self._calls]
+            if self._held_new in ids:
+                self._call_ix = ids.index(self._held_new)
+            self._held_new = None
+            self._layout_key = None
 
         # hide when idle (setting): out of the way 8 s after the last reply, back with the next one
         idle = not cur and not q and not self._calls and self.mode == "cap"
@@ -2912,6 +3010,9 @@ class Widget:
         if self.view == "settings":
             return self._settings_panel(force)
         call = self._call()
+        held = self._engaged()
+        if held:
+            show = None  # audio still plays; the call he is answering stays put
         playing = bool(show)
         body_text = ""
         if show:
@@ -2921,7 +3022,7 @@ class Widget:
         lib_rows, lib_sig, bg_count = self._library_rows(q) if self.lib else ([], None, 0)
         key = (playing, body_text, show.get("id") if show else None,
                self._call_id(call) if call else None, self._call_ix, len(self._calls),
-               self._draft_sig(call), self.lib, lib_sig, self.mode)
+               self._draft_sig(call), self.lib, lib_sig, self.mode, held, self._held_label())
         # header (cheap, every tick)
         if show:
             name = self._where(show)
@@ -2937,12 +3038,12 @@ class Widget:
             n = len(self._calls)
             name = self._calls_names(n) if n else "All caught up"
             meta = self._last_lines(last)
-        nmax = Wp - p(78) - p(171)  # five header buttons
+        nmax = self._head_w() - p(18)  # room for the ↗
         shown_name = self._fit(name, self.F["title"], nmax)
         if self._text(self.pan_name, shown_name) or force:
-            c.coords(self.pan_arrow, p(78) + self.F["title"].measure(shown_name) + p(6), p(31))
+            c.coords(self.pan_arrow, p(PAD + ORB + 14) + self.F["title"].measure(shown_name) + p(6), p(31))
         if not toast:
-            self._text(self.pan_meta, self._fit(meta, self.F["meta"], Wp - p(78) - p(PAD)))  # under the buttons
+            self._text(self.pan_meta, self._fit(meta, self.F["meta"], self._head_w()))  # clear of the buttons
             self._fill(self.pan_meta, MUTED)
         self._text(self.next_t, self._ellipsize(f"Next: {q[0].get('project')}" if q else "Nothing after this",
                                                 self.F["meta"], p(150)))
@@ -2977,6 +3078,8 @@ class Widget:
         else:
             self._bar_y = 0
         c.itemconfigure("play", state=state(playing))
+        if not call:
+            self._call_band = None
 
         # calls
         self._ctx_shown = False
@@ -2986,39 +3089,50 @@ class Widget:
         self.chips = []
         if call:
             y += p(14)
+            band_top = y - p(16)
             c.coords(self.call_rule, p(PAD), y, p(PAD) + p(20), y)
             c.coords(self.call_eyebrow, p(PAD) + p(28), y)
-            eyebrow = ("SENT · WAITING" if call.get("sent_answer") else "APP CALL") if call.get("kind") == "project"                 else "YOUR CALL"  # from a cloud Project thread
+            eyebrow = ("SENT · WAITING" if call.get("sent_answer") else "APP CALL") if call.get("kind") == "project" \
+                else "YOUR CALL"  # from a cloud Project thread
             self._text(self.call_eyebrow, eyebrow)
-            ew = self.F["mono"].measure(eyebrow)
-            x0 = p(PAD) + p(28) + ew + p(8)
-            room = (Wp - p(PAD) - x0 - self.F["mono"].measure("Dismiss") - p(20)
-                    - (self.F["mono"].measure("‹ 10/10 ›") + p(18) if len(self._calls) > 1 else 0))
+            # fixed slots from the right edge: Dismiss, next, counter, prev. Nothing here depends on the text.
+            right = Wp - p(PAD)
+            c.coords(self.call_dismiss, right, y)
+            nx = right - self.F["mono"].measure("Dismiss") - p(12) - p(14)
+            cw = self.F["mono"].measure("00/00")
+            cx = nx - p(14) - p(4) - cw / 2
+            px_ = cx - cw / 2 - p(4) - p(14)
+            many = len(self._calls) > 1
+            for tag, x in (("callprev", px_), ("callnext", nx)):
+                c.coords(self._nav_bg[tag], x, y)
+            c.coords(self.call_prev, px_, y)
+            c.coords(self.call_next, nx, y)
+            self._text(self.call_nav, f"{self._call_ix + 1}/{len(self._calls)}")
+            c.coords(self.call_nav, cx, y)
+            for it in (self.call_nav, self.call_prev, self.call_next, *self._nav_bg.values()):
+                c.itemconfigure(it, state=state(many))
+            new = self._held_label()
+            nx0 = p(PAD) + p(28) + self.F["mono"].measure(eyebrow) + p(10)
+            room_new = (px_ if many else right - self.F["mono"].measure("Dismiss")) - p(14 + 10) - nx0
+            self._text(self.call_new, self._ellipsize(f"NEW · {new}", self.F["mono_s"], room_new) if new else "")
+            c.coords(self.call_new, nx0, y)
+            c.itemconfigure(self.call_new, state=state(bool(new)))
+            # line 2: project · thread, the whole width, cut in the middle; star and the active dot after it
+            y += p(22)
             pin = self._pinned_state(call)
             active = not pin and self._priority(call) == 2
-            room -= p(22) + (p(14) if active else 0)
-            frm = self._fit(self._where(call, "· {}"), self.F["mono"], max(p(60), room))
+            room = Wp - 2 * p(PAD) - p(22) - (p(14) if active else 0)
+            full = " · ".join(x for x in (call.get("project") or "?", self._thread(call)) if x)
+            frm = self._ellipsize_mid(full, self.F["mono"], room)
             self._text(self.call_from, frm)
-            c.coords(self.call_from, x0, y)
-            px = x0 + self.F["mono"].measure(frm) + p(8)
+            c.coords(self.call_from, p(PAD), y)
+            px = p(PAD) + self.F["mono"].measure(frm) + p(8)
             self._text(self.call_pin, "★" if pin else "☆")
             self._fill(self.call_pin, EMBER if pin else FAINT)
             c.coords(self.call_pin, px, y)
             c.coords(self.call_act, px + self.F["mono"].measure("★") + p(6), y)
             self._call_active = active
-            right = Wp - p(PAD)
-            c.coords(self.call_dismiss, right, y)
-            right -= self.F["mono"].measure("Dismiss") + p(20)
-            many = len(self._calls) > 1
-            if many:
-                c.coords(self.call_next, right, y)
-                right -= p(16)
-                self._text(self.call_nav, f"{self._call_ix + 1}/{len(self._calls)}")
-                c.coords(self.call_nav, right, y)
-                right -= self.F["mono"].measure(f"{self._call_ix + 1}/{len(self._calls)}") + p(6)
-                c.coords(self.call_prev, right, y)
-            for it in (self.call_nav, self.call_prev, self.call_next):
-                c.itemconfigure(it, state=state(many))
+            self._call_band = (band_top, y + p(10))
             y += p(16)
             decs, d = self._draft(call)
             n, ix = len(decs), d["ix"]
@@ -3048,6 +3162,7 @@ class Widget:
         c.itemconfigure("ask", state=state(bool(call)))
         if call:
             c.itemconfigure(self.call_act, state="normal" if getattr(self, "_call_active", False) else "hidden")
+            c.itemconfigure(self.call_new, state="normal" if self._held_label() else "hidden")
             decs, d = self._draft(call)
             in_review = len(decs) > 1 and d["ix"] >= len(decs)
             for i in (self.entry_bg, self.entry_win, self.send_bg, self.send_g):
@@ -3056,7 +3171,7 @@ class Widget:
             c.tag_lower("askhit", self.glow_cap)
         c.itemconfigure(self.ctx_win, state="normal" if (call and self._ctx_shown) else "hidden")
         if call and len(self._calls) < 2:
-            for it in (self.call_nav, self.call_prev, self.call_next):
+            for it in (self.call_nav, self.call_prev, self.call_next, *self._nav_bg.values()):
                 c.itemconfigure(it, state="hidden")
         if not call and self.root.focus_get() is self.entry:
             self.root.focus_set()
